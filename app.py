@@ -33,8 +33,25 @@ FOLDER_ID = "0AJdsyYPdSxydUk9PVA"
 GAS_MAIL_URL = "https://script.google.com/macros/s/AKfycbxIQXJ-QENFEZn6IgyQLdESmdPMMj4NTKF1O4FlE4WhAPeBanbYFMoprVfiqo4c2Wt4/exec"
 
 # ==========================================
-# 1. 核心工具函數 (含 PDF 功能)
+# 1. 核心工具函數 (含 PDF 功能與變色功能)
 # ==========================================
+def apply_bg_color(subject):
+    """根據科目動態改變網頁背景顏色"""
+    bg_color = "#FFFFFF"  # 預設純白 (國語或未指定)
+    if subject == "數學":
+        bg_color = "#E6F3FF"  # 數學：淺藍底色
+    elif subject == "英語":
+        bg_color = "#FFE6E6"  # 英語：淺粉紅底色
+        
+    st.markdown(f"""
+        <style>
+        .stApp {{
+            background-color: {bg_color} !important;
+            transition: background-color 0.4s ease;
+        }}
+        </style>
+    """, unsafe_allow_html=True)
+
 def get_drive_service():
     creds_info = st.secrets["connections"]["gsheets"]
     creds = service_account.Credentials.from_service_account_info(
@@ -87,13 +104,13 @@ def generate_report_pdf(df, title_name, sys_name):
     pdf.add_page()
     pdf.alias_nb_pages()
 
-    # 1. 表頭 (系統名稱 + 報表類型)
+    # 1. 表頭
     pdf.set_font('CustomFont', size=18)
     pdf.cell(0, 15, f"{sys_name}", ln=True, align='C')
     pdf.set_font('CustomFont', size=14)
     pdf.cell(0, 10, f"報表名稱：{title_name}", ln=True, align='C')
     
-    # 2. 統計日期 (✨ 修改 1：只顯示統計日期並置中)
+    # 2. 統計日期
     today_str = pd.Timestamp.today().strftime("%Y/%m/%d")
     pdf.set_font('CustomFont', size=10)
     pdf.cell(0, 10, f"統計日期：{today_str}", ln=True, align='C')
@@ -101,8 +118,6 @@ def generate_report_pdf(df, title_name, sys_name):
 
     # 3. 表格主體
     pdf.set_font('CustomFont', size=9)
-    
-    # 計算最適欄寬
     col_widths = [pdf.get_string_width(str(col)) + 4 for col in df.columns]
     for _, row in df.iterrows():
         for i, item in enumerate(row):
@@ -111,29 +126,24 @@ def generate_report_pdf(df, title_name, sys_name):
                 col_widths[i] = w
 
     row_height = pdf.font_size + 2 
-    
-    # ✨ 修改 2：計算表格置中所需的 X 座標
     total_table_width = sum(col_widths)
-    # pdf.w 是頁面總寬度 (A4 預設為 210mm)
     start_x = (pdf.w - total_table_width) / 2
     
-    # 繪製表格標題列
     pdf.set_fill_color(235, 235, 235) 
-    pdf.set_x(start_x) # 👈 將游標移到置中起點
+    pdf.set_x(start_x)
     for i, col in enumerate(df.columns):
         pdf.cell(col_widths[i], row_height, str(col), border=1, fill=True, align='C')
     pdf.ln()
 
-    # 繪製資料列
     for _, row in df.iterrows():
         if pdf.get_y() > 260:
             pdf.add_page()
-        pdf.set_x(start_x) # 👈 將游標移到置中起點
+        pdf.set_x(start_x)
         for i, item in enumerate(row):
             pdf.cell(col_widths[i], row_height, str(item), border=1, align='C')
         pdf.ln()
 
-    # 4. 承辦人簽章 (✨ 修改 3：加入列印日期並移到簽章下方)
+    # 4. 承辦人簽章
     pdf.ln(10)
     pdf.set_font('CustomFont', size=11)
     pdf.cell(0, 10, "承辦人簽章：__________________________", ln=True, align='R')
@@ -164,17 +174,21 @@ try:
 except Exception:
     df_news = pd.DataFrame(columns=["日期", "標題", "內容"])
 
+# === 初始化 Session State ===
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 if "user_name" not in st.session_state:
     st.session_state.user_name = ""
 if "user_role" not in st.session_state:
     st.session_state.user_role = "教師"
+if "edit_record_idx" not in st.session_state:
+    st.session_state.edit_record_idx = None
 
 # ==========================================
 # 畫面區塊 1：登入介面
 # ==========================================
 if not st.session_state.logged_in:
+    apply_bg_color("純白") # 登入畫面保持白色
     col_space_left, main_col, col_space_right = st.columns([1, 8, 1])
     with main_col:
         clean_sys_name = sys_name.replace("🏫", "").strip() 
@@ -214,16 +228,22 @@ if not st.session_state.logged_in:
                     try:
                         df_users = conn.read(spreadsheet=SHEET_URL, worksheet="Users", ttl=0).dropna(how="all")
                         df_users['密碼'] = df_users['密碼'].astype(str)
+                        
                         user_match = df_users[(df_users['帳號'] == login_account) & (df_users['密碼'] == str(login_password))]
                         
                         if not user_match.empty:
-                            st.session_state.logged_in = True
-                            st.session_state.user_name = user_match.iloc[0]['姓名']
-                            st.session_state.user_role = user_match.iloc[0].get('權限', '教師')
-                            st.balloons()
-                            st.toast(f"歡迎回來，{st.session_state.user_name}！", icon="👋")
-                            time.sleep(1)
-                            st.rerun()
+                            # 檢查帳號是否被停用
+                            user_status = user_match.iloc[0].get('狀態', '啟用')
+                            if user_status == '停用':
+                                st.error("❌ 此帳號已被停用，請聯絡系統管理員。")
+                            else:
+                                st.session_state.logged_in = True
+                                st.session_state.user_name = user_match.iloc[0]['姓名']
+                                st.session_state.user_role = user_match.iloc[0].get('權限', '教師')
+                                st.balloons()
+                                st.toast(f"歡迎回來，{st.session_state.user_name}！", icon="👋")
+                                time.sleep(1)
+                                st.rerun()
                         else:
                             st.error("❌ 帳號或密碼錯誤")
                     except Exception as e:
@@ -252,6 +272,10 @@ else:
 
     try:
         df_users = conn.read(spreadsheet=SHEET_URL, worksheet="Users", ttl=600).dropna(how="all")
+        # 確保 Users 資料表有狀態欄位
+        if '狀態' not in df_users.columns:
+            df_users['狀態'] = '啟用'
+            
         df_students = conn.read(spreadsheet=SHEET_URL, worksheet="Students", ttl=600).dropna(how="all")
         df_records = conn.read(spreadsheet=SHEET_URL, worksheet="Records", ttl=600).dropna(how="all")
 
@@ -261,17 +285,27 @@ else:
         
         tabs = st.tabs(tabs_list)
 
+        # ==================================================
+        # 分頁 1：✍️ 新增輔導紀錄
+        # ==================================================
         with tabs[0]:
             teacher_students = []
             for _, row in df_students.iterrows():
                 for sub in ['國語', '英語', '數學']:
                     if str(row.get(f'{sub}_教學者', '')).strip() == st.session_state.user_name:
                         teacher_students.append(f"{row['學生姓名']} - {sub}")
+            
             if not teacher_students:
                 st.info("您目前沒有被指派負責的學生。")
+                apply_bg_color("預設") 
             else:
                 selected_st_sub = st.selectbox("請選擇輔導對象：", teacher_students, key="add_sel")
                 sel_stu, sel_sub = selected_st_sub.split(" - ")
+                
+                # 依照選擇的科目變色
+                if st.session_state.edit_record_idx is None:
+                    apply_bg_color(sel_sub)
+                
                 stu_score = 0
                 stu_data = df_students[df_students['學生姓名'] == sel_stu]
                 if not stu_data.empty:
@@ -279,6 +313,7 @@ else:
                     if score_col_name in stu_data.columns:
                         val = stu_data.iloc[0].get(score_col_name, 0)
                         if pd.notna(val): stu_score = val
+                        
                 with st.form(key="record_form", clear_on_submit=True):
                     c1, c2 = st.columns(2)
                     with c1:
@@ -292,6 +327,7 @@ else:
                         status = st.radio("學習狀況", ["精熟", "未精熟，已解說", "未精熟，改日再測"])
                     p_link = st.text_input("佐證網址 (選填)")
                     u_file = st.file_uploader("上傳佐證檔案", type=["png", "jpg", "jpeg", "pdf", "docx"])
+                    
                     if st.form_submit_button("💾 儲存紀錄"):
                         if not summary: st.warning("⚠️ 教學摘要為必填！")
                         elif not p_link and not u_file: st.warning("⚠️ 必須填寫「佐證網址」或上傳「佐證檔案」！")
@@ -315,24 +351,137 @@ else:
                                 time.sleep(1.5)
                                 st.rerun()
 
+        # ==================================================
+        # 分頁 2：🗂️ 個人紀錄回顧 (包含編輯/刪除功能)
+        # ==================================================
         with tabs[1]:
-            st.subheader("🗂️ 您的教學紀錄")
-            my_records = df_records[df_records['學生姓名'].isin([s.split(" - ")[0] for s in teacher_students])]
-            if my_records.empty:
-                st.info("尚無相關紀錄")
-            else:
-                for _, row in my_records.sort_values("輔導日期", ascending=False).iterrows():
-                    with st.expander(f"📅 {row.get('輔導日期', row.get('診斷日期', ''))} | {row['學生姓名']} ({row['授課科目']}) - {row['教學內容摘要']}"):
-                        st.markdown(f"- **學年度：** {row['學年度']}\n- **輔導日期：** {row.get('輔導日期', '未註記')}\n- **診斷日期：** {row['診斷日期']}\n- **篩選成績：** {row['篩選測驗成績']}\n- **策略：** {row['教學輔導策略']}\n- **狀況：** {row['學習狀況']}")
-                        p_data = str(row['佐證資料連結'])
-                        if p_data and p_data != "nan":
+            # 模式 A：瀏覽模式 (尚未點擊編輯)
+            if st.session_state.edit_record_idx is None:
+                st.subheader("🗂️ 您的教學紀錄")
+                my_records = df_records[df_records['學生姓名'].isin([s.split(" - ")[0] for s in teacher_students])]
+                if my_records.empty:
+                    st.info("尚無相關紀錄")
+                else:
+                    for idx, row in my_records.sort_values("輔導日期", ascending=False).iterrows():
+                        with st.expander(f"📅 {row.get('輔導日期', row.get('診斷日期', ''))} | {row['學生姓名']} ({row['授課科目']}) - {row['教學內容摘要']}"):
+                            st.markdown(f"- **學年度：** {row['學年度']}\n- **輔導日期：** {row.get('輔導日期', '未註記')}\n- **診斷日期：** {row['診斷日期']}\n- **篩選成績：** {row['篩選測驗成績']}\n- **策略：** {row['教學輔導策略']}\n- **狀況：** {row['學習狀況']}")
+                            p_data = str(row['佐證資料連結'])
+                            if p_data and p_data != "nan":
+                                st.markdown("---")
+                                btns = []
+                                for p in p_data.split(" / "):
+                                    if "連結: " in p: btns.append(f'🔗 <a href="{p.replace("連結: ", "")}" target="_blank">[網址]</a>')
+                                    if "檔案: " in p: btns.append(f'📁 <a href="{p.replace("檔案: ", "")}" target="_blank">[檔案]</a>')
+                                st.markdown(" ".join(btns), unsafe_allow_html=True)
+                            
                             st.markdown("---")
-                            btns = []
-                            for p in p_data.split(" / "):
-                                if "連結: " in p: btns.append(f'🔗 <a href="{p.replace("連結: ", "")}" target="_blank">[網址]</a>')
-                                if "檔案: " in p: btns.append(f'📁 <a href="{p.replace("檔案: ", "")}" target="_blank">[檔案]</a>')
-                            st.markdown(" ".join(btns), unsafe_allow_html=True)
+                            # 編輯與刪除按鈕
+                            col_space, col_edit, col_del = st.columns([6, 1, 1])
+                            with col_edit:
+                                if st.button("✏️ 編輯", key=f"btn_edit_{idx}"):
+                                    st.session_state.edit_record_idx = idx
+                                    st.rerun()
+                            with col_del:
+                                if st.button("🗑️ 刪除", key=f"btn_del_{idx}"):
+                                    df_records = df_records.drop(idx)
+                                    conn.update(spreadsheet=SHEET_URL, worksheet="Records", data=df_records)
+                                    st.cache_data.clear()
+                                    st.toast("✅ 紀錄已成功刪除！", icon="🗑️")
+                                    time.sleep(1)
+                                    st.rerun()
 
+            # 模式 B：編輯模式
+            else:
+                edit_idx = st.session_state.edit_record_idx
+                # 防止意外錯誤 (例如資料重新讀取後 index 跑掉)
+                if edit_idx not in df_records.index:
+                    st.session_state.edit_record_idx = None
+                    st.rerun()
+                
+                edit_row = df_records.loc[edit_idx]
+                edit_sub = edit_row['授課科目']
+                
+                # 進入編輯模式時，依照該紀錄的科目變換背景顏色
+                apply_bg_color(edit_sub)
+                
+                st.subheader(f"✏️ 編輯紀錄：{edit_row['學生姓名']} - {edit_sub}")
+                
+                with st.form("edit_record_form", clear_on_submit=False):
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.info(f"📌 **學年度：** {edit_row['學年度']}")
+                        st.info(f"📊 **篩選測驗成績：** {edit_row['篩選測驗成績']}")
+                        st.info(f"📋 **診斷日期：** {edit_row['診斷日期']}")
+                        
+                        try: default_c_date = pd.to_datetime(edit_row.get('輔導日期')).date()
+                        except: default_c_date = pd.Timestamp.today().date()
+                        new_counsel_date = st.date_input("🗓️ 實際輔導日期", value=default_c_date)
+                    with c2:
+                        new_summary = st.text_input("教學摘要 (代碼)", value=str(edit_row['教學內容摘要']))
+                        
+                        # 還原策略選單
+                        old_strat_str = str(edit_row['教學輔導策略'])
+                        old_strats = [s.strip() for s in old_strat_str.split(",")] if old_strat_str and old_strat_str != "nan" else []
+                        available_strats = ["演示教學", "學習單、試題習寫", "實物操作", "數位學習平台"]
+                        valid_old_strats = [s for s in old_strats if s in available_strats]
+                        new_strategy = st.multiselect("輔導策略", available_strats, default=valid_old_strats)
+                        
+                        # 還原學習狀況
+                        old_status = str(edit_row['學習狀況'])
+                        status_options = ["精熟", "未精熟，已解說", "未精熟，改日再測"]
+                        default_status_idx = status_options.index(old_status) if old_status in status_options else 0
+                        new_status = st.radio("學習狀況", status_options, index=default_status_idx)
+                    
+                    old_p_data = str(edit_row['佐證資料連結'])
+                    st.markdown(f"📂 **目前佐證資料：** `{old_p_data if old_p_data and old_p_data != 'nan' else '無'}`")
+                    st.info("💡 【提醒您】：如果不更動佐證資料，下方兩個欄位請保持空白即可，系統會為您保留舊有資料。")
+                    
+                    new_p_link = st.text_input("新佐證網址 (若不更改請留白)")
+                    new_u_file = st.file_uploader("上傳新佐證檔案 (若不更改請留白)", type=["png", "jpg", "jpeg", "pdf", "docx"])
+                    
+                    c_save, c_cancel = st.columns([1, 1])
+                    with c_save:
+                        save_btn = st.form_submit_button("💾 儲存修改", use_container_width=True)
+                    with c_cancel:
+                        cancel_btn = st.form_submit_button("❌ 取消編輯", use_container_width=True)
+                        
+                    if cancel_btn:
+                        st.session_state.edit_record_idx = None
+                        st.rerun()
+                        
+                    if save_btn:
+                        if not new_summary:
+                            st.warning("⚠️ 教學摘要為必填！")
+                        else:
+                            with st.spinner("更新資料中..."):
+                                final_p_entries = []
+                                # 邏輯：如果有填新網址或新檔案，就覆蓋
+                                if new_p_link or new_u_file:
+                                    if new_p_link: final_p_entries.append(f"連結: {new_p_link}")
+                                    if new_u_file:
+                                        drive_link = upload_to_drive(new_u_file, new_u_file.name)
+                                        if drive_link: final_p_entries.append(f"檔案: {drive_link}")
+                                else:
+                                    # 如果沒填新的，就保留舊的
+                                    if old_p_data and old_p_data != 'nan':
+                                        final_p_entries = old_p_data.split(" / ")
+                                
+                                df_records.at[edit_idx, '教學內容摘要'] = new_summary
+                                df_records.at[edit_idx, '教學輔導策略'] = ", ".join(new_strategy)
+                                df_records.at[edit_idx, '學習狀況'] = new_status
+                                df_records.at[edit_idx, '輔導日期'] = new_counsel_date.strftime("%Y/%m/%d")
+                                df_records.at[edit_idx, '佐證資料連結'] = " / ".join(final_p_entries)
+                                
+                                conn.update(spreadsheet=SHEET_URL, worksheet="Records", data=df_records)
+                                st.cache_data.clear()
+                                st.session_state.edit_record_idx = None
+                                st.toast('✅ 紀錄已成功更新！', icon='🎉')
+                                time.sleep(1.5)
+                                st.rerun()
+
+        # ==================================================
+        # 分頁 3：⚙️ 個人帳號設定
+        # ==================================================
         with tabs[2]:
             st.subheader("⚙️ 個人帳號設定")
             with st.form("change_pwd_form"):
@@ -433,11 +582,16 @@ else:
                     if pdf_data2:
                         st.download_button(label="📥 匯出 PDF", data=bytes(pdf_data2), file_name="教師填寫進度.pdf", mime="application/pdf", use_container_width=True, key="dl_tch_pdf")
                 
+                # 新增開關：是否顯示未指派學生的教師
+                show_unassigned = st.checkbox("👁️ 顯示未指派學生的教師", value=True)
+                
                 teachers_list = df_users[df_users['權限'] == '教師']['姓名'].dropna().unique().tolist()
                 for t_name in teachers_list:
                     df_tch = df_report[df_report['指導教師'] == t_name]
                     if df_tch.empty:
-                        with st.expander(f"🧑‍🏫 【{t_name} 老師】 - 無指派學生"): st.info("無指派對象")
+                        # 根據開關決定是否顯示
+                        if show_unassigned:
+                            with st.expander(f"🧑‍🏫 【{t_name} 老師】 - 無指派學生"): st.info("無指派對象")
                     else:
                         t_email = ""
                         if 'Email' in df_users.columns:
@@ -482,7 +636,7 @@ else:
                                                     st.markdown(" ".join(btns), unsafe_allow_html=True)
                                 st.markdown('<div style="border-bottom: 1px dashed #eee; margin-bottom: 2px;"></div>', unsafe_allow_html=True)
 
-            # --- 分頁 6：系統與公告管理 ---
+            # --- 分頁 6：系統與公告管理 (含新增的使用者管理) ---
             with tabs[5]:
                 st.subheader("⚙️ 系統基本設定")
                 with st.form("settings_form"):
@@ -503,7 +657,59 @@ else:
                         ])
                         conn.update(spreadsheet=SHEET_URL, worksheet="Settings", data=new_settings_df)
                         st.cache_data.clear() ; st.toast('已儲存！') ; time.sleep(1) ; st.rerun()
+                
                 st.markdown("---")
+                
+                # 新增的使用者管理區塊
+                st.subheader("👥 使用者帳號管理")
+                with st.form("add_user_form", clear_on_submit=True):
+                    st.write("➕ **新增使用者**")
+                    c_acc, c_pwd, c_name = st.columns(3)
+                    with c_acc: n_acc = st.text_input("帳號 (必填)")
+                    with c_pwd: n_pwd = st.text_input("密碼 (必填)")
+                    with c_name: n_name = st.text_input("姓名 (必填)")
+                    
+                    c_role, c_email, c_space = st.columns(3)
+                    with c_role: n_role = st.selectbox("權限", ["教師", "管理者"])
+                    with c_email: n_email = st.text_input("Email (選填)")
+                    
+                    if st.form_submit_button("新增帳號"):
+                        if not n_acc or not n_pwd or not n_name:
+                            st.warning("⚠️ 帳號、密碼、姓名皆為必填！")
+                        elif n_acc in df_users['帳號'].values:
+                            st.error("❌ 此帳號已存在，請更換帳號名稱！")
+                        else:
+                            new_user = pd.DataFrame([{
+                                "帳號": n_acc, "密碼": n_pwd, "姓名": n_name,
+                                "權限": n_role, "Email": n_email, "狀態": "啟用"
+                            }])
+                            updated_users_df = pd.concat([df_users, new_user], ignore_index=True)
+                            conn.update(spreadsheet=SHEET_URL, worksheet="Users", data=updated_users_df)
+                            st.cache_data.clear()
+                            st.toast("✅ 使用者新增成功！")
+                            time.sleep(1)
+                            st.rerun()
+
+                st.write("🛡️ **現有帳號狀態管理**")
+                for i, row in df_users.iterrows():
+                    c_u1, c_u2, c_u3 = st.columns([3, 2, 2])
+                    status_text = "🟢 啟用" if row['狀態'] != '停用' else "🔴 停用"
+                    c_u1.write(f"**{row['姓名']}** ({row['帳號']}) - {row['權限']}")
+                    c_u2.write(status_text)
+                    
+                    btn_label = "停用帳號" if row['狀態'] != '停用' else "啟用帳號"
+                    if c_u3.button(btn_label, key=f"toggle_user_{i}"):
+                        if row['姓名'] == st.session_state.user_name:
+                            st.warning("⚠️ 為了安全起見，您無法停用自己的帳號！")
+                        else:
+                            new_status = '停用' if row['狀態'] != '停用' else '啟用'
+                            df_users.at[i, '狀態'] = new_status
+                            conn.update(spreadsheet=SHEET_URL, worksheet="Users", data=df_users)
+                            st.cache_data.clear()
+                            st.rerun()
+
+                st.markdown("---")
+                
                 st.subheader("📢 最新消息公告管理")
                 with st.form("add_news_form", clear_on_submit=True):
                     c_date, c_title = st.columns([1, 3])
