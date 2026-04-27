@@ -161,7 +161,7 @@ try:
     df_settings = conn.read(spreadsheet=SHEET_URL, worksheet="Settings", ttl=600).dropna(how="all")
     sys_name = df_settings.loc[df_settings['設定項'] == 'SchoolName', '設定值'].values[0] if 'SchoolName' in df_settings['設定項'].values else "🏫 學習扶助系統"
     sys_logo = df_settings.loc[df_settings['設定項'] == 'LogoLink', '設定值'].values[0] if 'LogoLink' in df_settings['設定項'].values else ""
-    sys_year = df_settings.loc[df_settings['設定項'] == 'SchoolYear', '設定值'].values[0] if 'SchoolYear' in df_settings['設定項'].values else "114上"
+    sys_year = df_settings.loc[df_settings['設定項'] == 'SchoolYear', '設定值'].values[0] if 'SchoolYear' in df_settings['設定項'].values else "114上" # 保留變數以防舊資料錯亂
     sys_date = df_settings.loc[df_settings['設定項'] == 'DiagDate', '設定值'].values[0] if 'DiagDate' in df_settings['設定項'].values else pd.Timestamp.today().strftime("%Y/%m/%d")
 except Exception:
     sys_name = "🏫 學習扶助系統"
@@ -232,7 +232,6 @@ if not st.session_state.logged_in:
                         user_match = df_users[(df_users['帳號'] == login_account) & (df_users['密碼'] == str(login_password))]
                         
                         if not user_match.empty:
-                            # 檢查帳號是否被停用
                             user_status = user_match.iloc[0].get('狀態', '啟用')
                             if user_status == '停用':
                                 st.error("❌ 此帳號已被停用，請聯絡系統管理員。")
@@ -272,9 +271,7 @@ else:
 
     try:
         df_users = conn.read(spreadsheet=SHEET_URL, worksheet="Users", ttl=600).dropna(how="all")
-        # 確保 Users 資料表有狀態欄位
-        if '狀態' not in df_users.columns:
-            df_users['狀態'] = '啟用'
+        if '狀態' not in df_users.columns: df_users['狀態'] = '啟用'
             
         df_students = conn.read(spreadsheet=SHEET_URL, worksheet="Students", ttl=600).dropna(how="all")
         df_records = conn.read(spreadsheet=SHEET_URL, worksheet="Records", ttl=600).dropna(how="all")
@@ -299,26 +296,27 @@ else:
                 st.info("您目前沒有被指派負責的學生。")
                 apply_bg_color("預設") 
             else:
-                selected_st_sub = st.selectbox("請選擇輔導對象：", teacher_students, key="add_sel")
-                sel_stu, sel_sub = selected_st_sub.split(" - ")
+                st.markdown("**✅ 請勾選本次輔導的對象 (可多選)：**")
+                selected_st_subs = []
                 
-                # 依照選擇的科目變色
+                # 將核取方塊以 4 個欄位並排顯示，比較整齊
+                chk_cols = st.columns(4)
+                for i, ts in enumerate(teacher_students):
+                    if chk_cols[i % 4].checkbox(ts, key=f"add_chk_{ts}"):
+                        selected_st_subs.append(ts)
+                
+                # 依照選擇的第一位學生的科目來變色
                 if st.session_state.edit_record_idx is None:
-                    apply_bg_color(sel_sub)
-                
-                stu_score = 0
-                stu_data = df_students[df_students['學生姓名'] == sel_stu]
-                if not stu_data.empty:
-                    score_col_name = f"{sel_sub}_成績"
-                    if score_col_name in stu_data.columns:
-                        val = stu_data.iloc[0].get(score_col_name, 0)
-                        if pd.notna(val): stu_score = val
+                    if selected_st_subs:
+                        first_sub = selected_st_subs[0].split(" - ")[1]
+                        apply_bg_color(first_sub)
+                    else:
+                        apply_bg_color("預設")
                         
                 with st.form(key="record_form", clear_on_submit=True):
                     c1, c2 = st.columns(2)
                     with c1:
-                        st.info(f"📌 **學年度：** {sys_year}")
-                        st.info(f"📊 **篩選測驗成績：** {stu_score}")
+                        counsel_term = st.radio("⏳ 教學輔導時間", ["114上", "114下"], horizontal=True)
                         st.info(f"📋 **(系統帶入) 診斷日期：** {sys_date}")
                         counsel_date = st.date_input("🗓️ 實際輔導日期", value=pd.Timestamp.today().date())
                     with c2:
@@ -329,25 +327,55 @@ else:
                     u_file = st.file_uploader("上傳佐證檔案", type=["png", "jpg", "jpeg", "pdf", "docx"])
                     
                     if st.form_submit_button("💾 儲存紀錄"):
-                        if not summary: st.warning("⚠️ 教學摘要為必填！")
-                        elif not p_link and not u_file: st.warning("⚠️ 必須填寫「佐證網址」或上傳「佐證檔案」！")
+                        if not selected_st_subs:
+                            st.warning("⚠️ 請至少勾選一位輔導對象！")
+                        elif not summary: 
+                            st.warning("⚠️ 教學摘要為必填！")
+                        elif not p_link and not u_file: 
+                            st.warning("⚠️ 必須填寫「佐證網址」或上傳「佐證檔案」！")
                         else:
                             with st.spinner('上傳資料中...'):
                                 drive_link = upload_to_drive(u_file, u_file.name) if u_file else ""
                                 p_entries = []
                                 if p_link: p_entries.append(f"連結: {p_link}")
                                 if drive_link: p_entries.append(f"檔案: {drive_link}")
-                                new_rec = pd.DataFrame([{
-                                    "學年度": sys_year, "授課科目": sel_sub, "學生姓名": sel_stu,
-                                    "篩選測驗成績": stu_score, "教學內容摘要": summary, "教學輔導策略": ", ".join(strategy),
-                                    "學習狀況": status, "診斷日期": sys_date, 
-                                    "輔導日期": counsel_date.strftime("%Y/%m/%d"),
-                                    "佐證資料連結": " / ".join(p_entries)
-                                }])
-                                updated_df = pd.concat([df_records, new_rec], ignore_index=True)
+                                
+                                new_records_list = []
+                                # 針對有勾選的每位學生，逐一取得各自的測驗成績並寫入資料庫
+                                for st_sub in selected_st_subs:
+                                    sel_stu, sel_sub = st_sub.split(" - ")
+                                    stu_score = 0
+                                    stu_data = df_students[df_students['學生姓名'] == sel_stu]
+                                    if not stu_data.empty:
+                                        score_col_name = f"{sel_sub}_成績"
+                                        if score_col_name in stu_data.columns:
+                                            val = stu_data.iloc[0].get(score_col_name, 0)
+                                            if pd.notna(val): stu_score = val
+                                            
+                                    new_records_list.append({
+                                        "學年度": counsel_term, 
+                                        "授課科目": sel_sub, 
+                                        "學生姓名": sel_stu,
+                                        "篩選測驗成績": stu_score, 
+                                        "教學內容摘要": summary, 
+                                        "教學輔導策略": ", ".join(strategy),
+                                        "學習狀況": status, 
+                                        "診斷日期": sys_date, 
+                                        "輔導日期": counsel_date.strftime("%Y/%m/%d"),
+                                        "佐證資料連結": " / ".join(p_entries)
+                                    })
+                                
+                                new_rec_df = pd.DataFrame(new_records_list)
+                                updated_df = pd.concat([df_records, new_rec_df], ignore_index=True)
                                 conn.update(spreadsheet=SHEET_URL, worksheet="Records", data=updated_df)
+                                
+                                # 存檔後手動清空勾選狀態，準備下一次填寫
+                                for ts in teacher_students:
+                                    if f"add_chk_{ts}" in st.session_state:
+                                        st.session_state[f"add_chk_{ts}"] = False
+                                        
                                 st.cache_data.clear()
-                                st.toast('✅ 紀錄已成功儲存！', icon='🎉')
+                                st.toast(f'✅ 已成功儲存 {len(new_records_list)} 筆紀錄！', icon='🎉')
                                 time.sleep(1.5)
                                 st.rerun()
 
@@ -355,7 +383,6 @@ else:
         # 分頁 2：🗂️ 個人紀錄回顧 (包含編輯/刪除功能)
         # ==================================================
         with tabs[1]:
-            # 模式 A：瀏覽模式 (尚未點擊編輯)
             if st.session_state.edit_record_idx is None:
                 st.subheader("🗂️ 您的教學紀錄")
                 my_records = df_records[df_records['學生姓名'].isin([s.split(" - ")[0] for s in teacher_students])]
@@ -364,7 +391,7 @@ else:
                 else:
                     for idx, row in my_records.sort_values("輔導日期", ascending=False).iterrows():
                         with st.expander(f"📅 {row.get('輔導日期', row.get('診斷日期', ''))} | {row['學生姓名']} ({row['授課科目']}) - {row['教學內容摘要']}"):
-                            st.markdown(f"- **學年度：** {row['學年度']}\n- **輔導日期：** {row.get('輔導日期', '未註記')}\n- **診斷日期：** {row['診斷日期']}\n- **篩選成績：** {row['篩選測驗成績']}\n- **策略：** {row['教學輔導策略']}\n- **狀況：** {row['學習狀況']}")
+                            st.markdown(f"- **教學輔導時間：** {row.get('學年度', '未註記')}\n- **輔導日期：** {row.get('輔導日期', '未註記')}\n- **診斷日期：** {row['診斷日期']}\n- **篩選成績：** {row['篩選測驗成績']}\n- **策略：** {row['教學輔導策略']}\n- **狀況：** {row['學習狀況']}")
                             p_data = str(row['佐證資料連結'])
                             if p_data and p_data != "nan":
                                 st.markdown("---")
@@ -375,7 +402,6 @@ else:
                                 st.markdown(" ".join(btns), unsafe_allow_html=True)
                             
                             st.markdown("---")
-                            # 編輯與刪除按鈕
                             col_space, col_edit, col_del = st.columns([6, 1, 1])
                             with col_edit:
                                 if st.button("✏️ 編輯", key=f"btn_edit_{idx}"):
@@ -390,18 +416,14 @@ else:
                                     time.sleep(1)
                                     st.rerun()
 
-            # 模式 B：編輯模式
             else:
                 edit_idx = st.session_state.edit_record_idx
-                # 防止意外錯誤 (例如資料重新讀取後 index 跑掉)
                 if edit_idx not in df_records.index:
                     st.session_state.edit_record_idx = None
                     st.rerun()
                 
                 edit_row = df_records.loc[edit_idx]
                 edit_sub = edit_row['授課科目']
-                
-                # 進入編輯模式時，依照該紀錄的科目變換背景顏色
                 apply_bg_color(edit_sub)
                 
                 st.subheader(f"✏️ 編輯紀錄：{edit_row['學生姓名']} - {edit_sub}")
@@ -409,24 +431,21 @@ else:
                 with st.form("edit_record_form", clear_on_submit=False):
                     c1, c2 = st.columns(2)
                     with c1:
-                        st.info(f"📌 **學年度：** {edit_row['學年度']}")
+                        old_term = str(edit_row.get('學年度', '114上'))
+                        default_term_idx = 1 if old_term == "114下" else 0
+                        new_counsel_term = st.radio("⏳ 教學輔導時間", ["114上", "114下"], index=default_term_idx, horizontal=True)
                         st.info(f"📊 **篩選測驗成績：** {edit_row['篩選測驗成績']}")
                         st.info(f"📋 **診斷日期：** {edit_row['診斷日期']}")
-                        
                         try: default_c_date = pd.to_datetime(edit_row.get('輔導日期')).date()
                         except: default_c_date = pd.Timestamp.today().date()
                         new_counsel_date = st.date_input("🗓️ 實際輔導日期", value=default_c_date)
                     with c2:
                         new_summary = st.text_input("教學摘要 (代碼)", value=str(edit_row['教學內容摘要']))
-                        
-                        # 還原策略選單
                         old_strat_str = str(edit_row['教學輔導策略'])
                         old_strats = [s.strip() for s in old_strat_str.split(",")] if old_strat_str and old_strat_str != "nan" else []
                         available_strats = ["演示教學", "學習單、試題習寫", "實物操作", "數位學習平台"]
                         valid_old_strats = [s for s in old_strats if s in available_strats]
                         new_strategy = st.multiselect("輔導策略", available_strats, default=valid_old_strats)
-                        
-                        # 還原學習狀況
                         old_status = str(edit_row['學習狀況'])
                         status_options = ["精熟", "未精熟，已解說", "未精熟，改日再測"]
                         default_status_idx = status_options.index(old_status) if old_status in status_options else 0
@@ -435,37 +454,31 @@ else:
                     old_p_data = str(edit_row['佐證資料連結'])
                     st.markdown(f"📂 **目前佐證資料：** `{old_p_data if old_p_data and old_p_data != 'nan' else '無'}`")
                     st.info("💡 【提醒您】：如果不更動佐證資料，下方兩個欄位請保持空白即可，系統會為您保留舊有資料。")
-                    
                     new_p_link = st.text_input("新佐證網址 (若不更改請留白)")
                     new_u_file = st.file_uploader("上傳新佐證檔案 (若不更改請留白)", type=["png", "jpg", "jpeg", "pdf", "docx"])
                     
                     c_save, c_cancel = st.columns([1, 1])
-                    with c_save:
-                        save_btn = st.form_submit_button("💾 儲存修改", use_container_width=True)
-                    with c_cancel:
-                        cancel_btn = st.form_submit_button("❌ 取消編輯", use_container_width=True)
+                    with c_save: save_btn = st.form_submit_button("💾 儲存修改", use_container_width=True)
+                    with c_cancel: cancel_btn = st.form_submit_button("❌ 取消編輯", use_container_width=True)
                         
                     if cancel_btn:
                         st.session_state.edit_record_idx = None
                         st.rerun()
                         
                     if save_btn:
-                        if not new_summary:
-                            st.warning("⚠️ 教學摘要為必填！")
+                        if not new_summary: st.warning("⚠️ 教學摘要為必填！")
                         else:
                             with st.spinner("更新資料中..."):
                                 final_p_entries = []
-                                # 邏輯：如果有填新網址或新檔案，就覆蓋
                                 if new_p_link or new_u_file:
                                     if new_p_link: final_p_entries.append(f"連結: {new_p_link}")
                                     if new_u_file:
                                         drive_link = upload_to_drive(new_u_file, new_u_file.name)
                                         if drive_link: final_p_entries.append(f"檔案: {drive_link}")
                                 else:
-                                    # 如果沒填新的，就保留舊的
-                                    if old_p_data and old_p_data != 'nan':
-                                        final_p_entries = old_p_data.split(" / ")
+                                    if old_p_data and old_p_data != 'nan': final_p_entries = old_p_data.split(" / ")
                                 
+                                df_records.at[edit_idx, '學年度'] = new_counsel_term
                                 df_records.at[edit_idx, '教學內容摘要'] = new_summary
                                 df_records.at[edit_idx, '教學輔導策略'] = ", ".join(new_strategy)
                                 df_records.at[edit_idx, '學習狀況'] = new_status
@@ -555,7 +568,7 @@ else:
                                     target_recs = df_records[(df_records['學生姓名'] == r['學生姓名']) & (df_records['授課科目'] == r['科目'])]
                                     for _, row in target_recs.sort_values("輔導日期", ascending=False).iterrows():
                                         with st.expander(f"📅 {row.get('輔導日期', row.get('診斷日期', ''))} | {row['教學內容摘要']}", expanded=True):
-                                            st.markdown(f"- **學年度：** {row['學年度']}\n- **輔導日期：** {row.get('輔導日期', '未註記')}\n- **診斷日期：** {row['診斷日期']}\n- **篩選成績：** {row['篩選測驗成績']}\n- **策略：** {row['教學輔導策略']}\n- **狀況：** {row['學習狀況']}")
+                                            st.markdown(f"- **教學輔導時間：** {row.get('學年度', '未註記')}\n- **輔導日期：** {row.get('輔導日期', '未註記')}\n- **診斷日期：** {row['診斷日期']}\n- **篩選成績：** {row['篩選測驗成績']}\n- **策略：** {row['教學輔導策略']}\n- **狀況：** {row['學習狀況']}")
                                             p_data = str(row['佐證資料連結'])
                                             if p_data and p_data != "nan":
                                                 st.markdown("---")
@@ -582,14 +595,12 @@ else:
                     if pdf_data2:
                         st.download_button(label="📥 匯出 PDF", data=bytes(pdf_data2), file_name="教師填寫進度.pdf", mime="application/pdf", use_container_width=True, key="dl_tch_pdf")
                 
-                # 新增開關：是否顯示未指派學生的教師
                 show_unassigned = st.checkbox("👁️ 顯示未指派學生的教師", value=True)
                 
                 teachers_list = df_users[df_users['權限'] == '教師']['姓名'].dropna().unique().tolist()
                 for t_name in teachers_list:
                     df_tch = df_report[df_report['指導教師'] == t_name]
                     if df_tch.empty:
-                        # 根據開關決定是否顯示
                         if show_unassigned:
                             with st.expander(f"🧑‍🏫 【{t_name} 老師】 - 無指派學生"): st.info("無指派對象")
                     else:
@@ -625,7 +636,7 @@ else:
                                         target_recs = df_records[(df_records['學生姓名'] == r['學生姓名']) & (df_records['授課科目'] == r['科目'])]
                                         for _, row in target_recs.sort_values("輔導日期", ascending=False).iterrows():
                                             with st.expander(f"📅 {row.get('輔導日期', row.get('診斷日期', ''))} | {row['教學內容摘要']}", expanded=True):
-                                                st.markdown(f"- **學年度：** {row['學年度']}\n- **輔導日期：** {row.get('輔導日期', '未註記')}\n- **診斷日期：** {row['診斷日期']}\n- **篩選成績：** {row['篩選測驗成績']}\n- **策略：** {row['教學輔導策略']}\n- **狀況：** {row['學習狀況']}")
+                                                st.markdown(f"- **教學輔導時間：** {row.get('學年度', '未註記')}\n- **輔導日期：** {row.get('輔導日期', '未註記')}\n- **診斷日期：** {row['診斷日期']}\n- **篩選成績：** {row['篩選測驗成績']}\n- **策略：** {row['教學輔導策略']}\n- **狀況：** {row['學習狀況']}")
                                                 p_data = str(row['佐證資料連結'])
                                                 if p_data and p_data != "nan":
                                                     st.markdown("---")
@@ -636,13 +647,12 @@ else:
                                                     st.markdown(" ".join(btns), unsafe_allow_html=True)
                                 st.markdown('<div style="border-bottom: 1px dashed #eee; margin-bottom: 2px;"></div>', unsafe_allow_html=True)
 
-            # --- 分頁 6：系統與公告管理 (含新增的使用者管理) ---
+            # --- 分頁 6：系統與公告管理 ---
             with tabs[5]:
                 st.subheader("⚙️ 系統基本設定")
                 with st.form("settings_form"):
                     new_sys_name = st.text_input("學校名稱 / 系統標題", value=sys_name)
                     new_logo_file = st.file_uploader("上傳學校 Logo", type=["png", "jpg", "jpeg"])
-                    new_sys_year = st.text_input("設定目前學年度", value=sys_year)
                     try: default_date = pd.to_datetime(sys_date).date()
                     except: default_date = pd.Timestamp.today().date()
                     new_sys_date = st.date_input("設定統一診斷日期", value=default_date)
@@ -652,7 +662,7 @@ else:
                         new_settings_df = pd.DataFrame([
                             {"設定項": "SchoolName", "設定值": new_sys_name},
                             {"設定項": "LogoLink", "設定值": final_logo_url},
-                            {"設定項": "SchoolYear", "設定值": new_sys_year},
+                            {"設定項": "SchoolYear", "設定值": sys_year}, # 為了避免影響其他讀取，保留原來的學年度字串在資料庫
                             {"設定項": "DiagDate", "設定值": new_sys_date.strftime("%Y/%m/%d")}
                         ])
                         conn.update(spreadsheet=SHEET_URL, worksheet="Settings", data=new_settings_df)
@@ -660,7 +670,6 @@ else:
                 
                 st.markdown("---")
                 
-                # 新增的使用者管理區塊
                 st.subheader("👥 使用者帳號管理")
                 with st.form("add_user_form", clear_on_submit=True):
                     st.write("➕ **新增使用者**")
