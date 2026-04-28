@@ -161,7 +161,7 @@ try:
     df_settings = conn.read(spreadsheet=SHEET_URL, worksheet="Settings", ttl=600).dropna(how="all")
     sys_name = df_settings.loc[df_settings['設定項'] == 'SchoolName', '設定值'].values[0] if 'SchoolName' in df_settings['設定項'].values else "🏫 學習扶助系統"
     sys_logo = df_settings.loc[df_settings['設定項'] == 'LogoLink', '設定值'].values[0] if 'LogoLink' in df_settings['設定項'].values else ""
-    sys_year = df_settings.loc[df_settings['設定項'] == 'SchoolYear', '設定值'].values[0] if 'SchoolYear' in df_settings['設定項'].values else "114上" # 保留變數以防舊資料錯亂
+    sys_year = df_settings.loc[df_settings['設定項'] == 'SchoolYear', '設定值'].values[0] if 'SchoolYear' in df_settings['設定項'].values else "114上" 
     sys_date = df_settings.loc[df_settings['設定項'] == 'DiagDate', '設定值'].values[0] if 'DiagDate' in df_settings['設定項'].values else pd.Timestamp.today().strftime("%Y/%m/%d")
 except Exception:
     sys_name = "🏫 學習扶助系統"
@@ -183,12 +183,15 @@ if "user_role" not in st.session_state:
     st.session_state.user_role = "教師"
 if "edit_record_idx" not in st.session_state:
     st.session_state.edit_record_idx = None
+# --- 新增：用來重置核取方塊的 ID ---
+if "record_form_id" not in st.session_state:
+    st.session_state.record_form_id = 0
 
 # ==========================================
 # 畫面區塊 1：登入介面
 # ==========================================
 if not st.session_state.logged_in:
-    apply_bg_color("純白") # 登入畫面保持白色
+    apply_bg_color("純白") 
     col_space_left, main_col, col_space_right = st.columns([1, 8, 1])
     with main_col:
         clean_sys_name = sys_name.replace("🏫", "").strip() 
@@ -299,13 +302,12 @@ else:
                 st.markdown("**✅ 請勾選本次輔導的對象 (可多選)：**")
                 selected_st_subs = []
                 
-                # 將核取方塊以 4 個欄位並排顯示，比較整齊
                 chk_cols = st.columns(4)
                 for i, ts in enumerate(teacher_students):
-                    if chk_cols[i % 4].checkbox(ts, key=f"add_chk_{ts}"):
+                    # --- 修正點：加上 record_form_id 讓 key 變成動態，儲存後改變 ID 即可重置勾選 ---
+                    if chk_cols[i % 4].checkbox(ts, key=f"add_chk_{ts}_{st.session_state.record_form_id}"):
                         selected_st_subs.append(ts)
                 
-                # 依照選擇的第一位學生的科目來變色
                 if st.session_state.edit_record_idx is None:
                     if selected_st_subs:
                         first_sub = selected_st_subs[0].split(" - ")[1]
@@ -341,7 +343,6 @@ else:
                                 if drive_link: p_entries.append(f"檔案: {drive_link}")
                                 
                                 new_records_list = []
-                                # 針對有勾選的每位學生，逐一取得各自的測驗成績並寫入資料庫
                                 for st_sub in selected_st_subs:
                                     sel_stu, sel_sub = st_sub.split(" - ")
                                     stu_score = 0
@@ -369,10 +370,8 @@ else:
                                 updated_df = pd.concat([df_records, new_rec_df], ignore_index=True)
                                 conn.update(spreadsheet=SHEET_URL, worksheet="Records", data=updated_df)
                                 
-                                # 存檔後手動清空勾選狀態，準備下一次填寫
-                                for ts in teacher_students:
-                                    if f"add_chk_{ts}" in st.session_state:
-                                        st.session_state[f"add_chk_{ts}"] = False
+                                # --- 修正點：不再手動修改 session_state，改為增加 ID ---
+                                st.session_state.record_form_id += 1 
                                         
                                 st.cache_data.clear()
                                 st.toast(f'✅ 已成功儲存 {len(new_records_list)} 筆紀錄！', icon='🎉')
@@ -380,7 +379,7 @@ else:
                                 st.rerun()
 
         # ==================================================
-        # 分頁 2：🗂️ 個人紀錄回顧 (包含編輯/刪除功能)
+        # 分頁 2：🗂️ 個人紀錄回顧
         # ==================================================
         with tabs[1]:
             if st.session_state.edit_record_idx is None:
@@ -536,7 +535,6 @@ else:
                         })
             df_report = pd.DataFrame(report_data)
             
-            # --- 分頁 4：學生報表 ---
             with tabs[3]:
                 col_h1, col_dl_csv, col_dl_pdf = st.columns([3.5, 1, 1])
                 with col_h1: st.subheader("📊 學生輔導狀況報表")
@@ -579,7 +577,6 @@ else:
                                                 st.markdown(" ".join(btns), unsafe_allow_html=True)
                             st.markdown('<div style="border-bottom: 1px dashed #eee; margin-bottom: 2px;"></div>', unsafe_allow_html=True)
 
-            # --- 分頁 5：教師報表 ---
             with tabs[4]:
                 col_h2, col_dl_csv2, col_dl_pdf2 = st.columns([3.5, 1, 1])
                 with col_h2: st.subheader("👨‍🏫 教師填寫進度報表")
@@ -647,7 +644,6 @@ else:
                                                     st.markdown(" ".join(btns), unsafe_allow_html=True)
                                 st.markdown('<div style="border-bottom: 1px dashed #eee; margin-bottom: 2px;"></div>', unsafe_allow_html=True)
 
-            # --- 分頁 6：系統與公告管理 ---
             with tabs[5]:
                 st.subheader("⚙️ 系統基本設定")
                 with st.form("settings_form"):
@@ -662,7 +658,7 @@ else:
                         new_settings_df = pd.DataFrame([
                             {"設定項": "SchoolName", "設定值": new_sys_name},
                             {"設定項": "LogoLink", "設定值": final_logo_url},
-                            {"設定項": "SchoolYear", "設定值": sys_year}, # 為了避免影響其他讀取，保留原來的學年度字串在資料庫
+                            {"設定項": "SchoolYear", "設定值": sys_year}, 
                             {"設定項": "DiagDate", "設定值": new_sys_date.strftime("%Y/%m/%d")}
                         ])
                         conn.update(spreadsheet=SHEET_URL, worksheet="Settings", data=new_settings_df)
