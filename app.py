@@ -164,11 +164,20 @@ def get_auto_school_year():
     """根據系統當前時間，自動判斷並回傳所屬的學年度（不分上下學期）"""
     today = pd.Timestamp.today()
     tw_yr = today.year - 1911
-    # 台灣學制：8月1日以後為新學年度
     if today.month >= 8:
         return str(tw_yr)
     else:
         return str(tw_yr - 1)
+
+def get_archive_term_name(diag_date_str):
+    """根據統一診斷日期，自動判讀並產生學期備份名稱 (如 2026/06/30 -> 115上)"""
+    try:
+        d = pd.to_datetime(diag_date_str)
+        tw_yr = d.year - 1911
+        term = '上' if d.month < 8 else '下'
+        return f"{tw_yr}{term}"
+    except Exception:
+        return "新學期"
 
 conn = st.connection("gsheets", type=GSheetsConnection)
 
@@ -678,7 +687,12 @@ else:
                 st.subheader("📦 學期轉換與資料備份管理")
                 
                 st.write("**1. 一鍵自動備份與封存**")
-                st.info(f"💡 系統將自動建立 `{sys_year}` 分頁，一鍵備份「使用者、學生、輔導紀錄」，並**清空**當前輔導紀錄以供新學期使用。")
+                
+                # 【修改點 2】：算出新學期備份名稱，並在介面上動態呈現。
+                dynamic_sys_year = get_archive_term_name(sys_date)
+                
+                st.info(f"💡 系統將自動建立 `{dynamic_sys_year}` 分頁，一鍵備份「使用者、學生、輔導紀錄」，並**清空**當前輔導紀錄以供新學期使用。")
+                
                 if st.button("📦 備份資料並清空本學期輔導紀錄"):
                     with st.spinner("正在自動建立資料表並備份資料..."):
                         tables_to_backup = {
@@ -688,7 +702,10 @@ else:
                         }
                         all_success = True
                         for base_name, df_data in tables_to_backup.items():
-                            archive_name = f"{base_name}_{sys_year}"
+                            
+                            # 【修改點 3】：此處建置檔案時，直接應用上述計算出來的 dynamic_sys_year。
+                            archive_name = f"{base_name}_{dynamic_sys_year}"
+                            
                             if auto_create_sheet(SHEET_URL, archive_name):
                                 try:
                                     try:
@@ -708,7 +725,7 @@ else:
                             empty_records_df = pd.DataFrame(columns=df_records.columns)
                             conn.update(spreadsheet=SHEET_URL, worksheet="Records", data=empty_records_df)
                             st.cache_data.clear()
-                            st.success(f"✅ 資料已成功備份至 `{sys_year}` 歷史資料表，且輔導紀錄已清空！")
+                            st.success(f"✅ 資料已成功備份至 `{dynamic_sys_year}` 歷史資料表，且輔導紀錄已清空！")
                             time.sleep(2)
                             st.rerun()
 
