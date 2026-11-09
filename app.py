@@ -16,7 +16,7 @@ from fpdf import FPDF
 # ==========================================
 # 0. 基本設定與 CSS 美化
 # ==========================================
-st.set_page_config(page_title="學習扶助系統", layout="wide", page_icon="📚")
+st.set_page_config(page_title="學習扶助與預警系統", layout="wide", page_icon="📚")
 
 st.markdown("""
     <style>
@@ -108,7 +108,7 @@ def auto_create_sheet(sheet_url, new_sheet_name):
                 'requests': [{'addSheet': {'properties': {'title': new_sheet_name}}}]
             }
             service.spreadsheets().batchUpdate(spreadsheetId=sheet_id, body=request_body).execute()
-            time.sleep(2) # 稍微等待 Google 建立完成
+            time.sleep(2)
         return True
     except Exception as e:
         st.error(f"自動建立資料表 {new_sheet_name} 失敗：{e}")
@@ -178,7 +178,7 @@ def generate_report_pdf(df, title_name, sys_name):
     return bytes(pdf.output())
 
 def get_auto_school_year():
-    """根據系統當前時間，自動判斷並回傳所屬的學年度（不分上下學期）"""
+    """根據系統當前時間，自動判斷並回傳所屬的學年度"""
     today = pd.Timestamp.today()
     tw_yr = today.year - 1911
     if today.month >= 8:
@@ -187,7 +187,7 @@ def get_auto_school_year():
         return str(tw_yr - 1)
 
 def get_archive_term_name(diag_date_str):
-    """根據統一診斷日期，自動判讀並產生學期備份名稱 (如 2026/06/30 -> 115上)"""
+    """根據統一診斷日期，自動判讀並產生學期備份名稱"""
     try:
         d = pd.to_datetime(diag_date_str)
         tw_yr = d.year - 1911
@@ -293,7 +293,6 @@ if not st.session_state.logged_in:
                     except Exception as e:
                         st.error(f"連線失敗：{e}")
 
-            # 表單外執行重繪以防 Rerun 衝突
             if do_login:
                 st.session_state.logged_in = True
                 st.session_state.user_name = matched_user_name
@@ -329,10 +328,8 @@ else:
         df_students = conn.read(spreadsheet=SHEET_URL, worksheet="Students", ttl=600).dropna(how="all")
         df_records = conn.read(spreadsheet=SHEET_URL, worksheet="Records", ttl=600).dropna(how="all")
         
-        # 讀取雙軌制預警學生資料 (適應新欄位格式)
         try:
             df_warn_students = conn.read(spreadsheet=SHEET_URL, worksheet="Warning_Students", ttl=600).dropna(how="all")
-            # 補齊可能缺失的科目欄位
             for col in WARN_STUDENT_COLS:
                 if col not in df_warn_students.columns:
                     df_warn_students[col] = ""
@@ -347,22 +344,29 @@ else:
         except Exception:
             df_warn_records = pd.DataFrame(columns=["學年度", "預警科目", "學生姓名", "輔導內容摘要", "教學輔導策略", "學習狀況", "填報日期", "輔導日期", "指導教師", "佐證資料連結"])
 
+        # ==================================================
+        # 動態分頁選單生成 (策略一：依據細分角色授權)
+        # ==================================================
+        cur_role = st.session_state.user_role
         tabs_list = ["✍️ 新增輔導紀錄", "🗂️ 個人紀錄回顧", "🕰️ 歷史紀錄查詢", "⚙️ 個人設定"]
-        if st.session_state.user_role == "管理者":
-            tabs_list.extend(["📊 學生報表", "👨‍🏫 教師報表", "⚙️ 系統設定"])
+        
+        has_report_access = cur_role in ["管理者", "超級管理者", "扶助承辦人", "預警承辦人"]
+        has_sys_settings_access = cur_role in ["管理者", "超級管理者"]
+        
+        if has_report_access:
+            tabs_list.extend(["📊 學生報表", "👨‍🏫 教師報表"])
+        if has_sys_settings_access:
+            tabs_list.append("⚙️ 系統設定")
         
         tabs = st.tabs(tabs_list)
 
         # ==================================================
-        # 分頁 1：✍️ 新增輔導紀錄 (支援雙軌)
+        # 分頁 1：✍️ 新增輔導紀錄
         # ==================================================
         with tabs[0]:
             sys_mode = st.radio("🔍 請選擇欲填報的輔導系統：", ["📚 學習扶助系統", "⚠️ 學習預警系統"], horizontal=True)
             st.markdown("---")
             
-            # --------------------------------
-            # 模式 A：原 學習扶助系統
-            # --------------------------------
             if sys_mode == "📚 學習扶助系統":
                 st.subheader("📚 新增學習扶助紀錄")
                 teacher_students = []
@@ -439,14 +443,10 @@ else:
                                     st.toast(f'✅ 已成功儲存 {len(new_records_list)} 筆扶助紀錄！', icon='🎉')
                                     time.sleep(1.5) ; st.rerun()
                                     
-            # --------------------------------
-            # 模式 B：新增 學習預警系統
-            # --------------------------------
             else:
                 apply_bg_color("預設")
                 st.subheader("⚠️ 新增學習預警紀錄")
                 
-                # 動態搜尋該教師負責的預警科目與學生
                 my_warn_subjects = []
                 for sub in WARN_SUBJECTS:
                     teacher_col = f"{sub}教學者"
@@ -459,7 +459,6 @@ else:
                 else:
                     selected_warn_subject = st.selectbox("📌 步驟一：請選擇本次輔導的預警科目", my_warn_subjects)
                     
-                    # 抓取該科目下該教師負責的學生名單
                     teacher_col = f"{selected_warn_subject}教學者"
                     df_target_students = df_warn_students[df_warn_students[teacher_col].astype(str).str.strip() == st.session_state.user_name]
                     student_options = df_target_students.apply(lambda row: f"{row['學生姓名']} ({row['班別']})", axis=1).tolist()
@@ -517,14 +516,13 @@ else:
                                     time.sleep(1.5) ; st.rerun()
 
         # ==================================================
-        # 分頁 2：🗂️ 個人紀錄回顧 (支援雙軌)
+        # 分頁 2：🗂️ 個人紀錄回顧
         # ==================================================
         with tabs[1]:
             if st.session_state.edit_record_idx is None:
                 rev_mode = st.radio("🔍 選擇查詢範圍：", ["📚 學習扶助系統", "⚠️ 學習預警系統"], horizontal=True, key="rev_mode")
                 st.markdown("---")
                 
-                # --- 扶助系統回顧 ---
                 if rev_mode == "📚 學習扶助系統":
                     st.subheader("🗂️ 您的學習扶助紀錄")
                     teacher_students_list = []
@@ -562,7 +560,6 @@ else:
                                         st.cache_data.clear() ; st.toast("✅ 紀錄已成功刪除！", icon="🗑️")
                                         time.sleep(1) ; st.rerun()
                                         
-                # --- 預警系統回顧 ---
                 else:
                     st.subheader("🗂️ 您的學習預警紀錄")
                     my_warn_records = df_warn_records[df_warn_records['指導教師'] == st.session_state.user_name]
@@ -594,7 +591,6 @@ else:
                                         st.cache_data.clear() ; st.toast("✅ 預警紀錄已刪除！", icon="🗑️")
                                         time.sleep(1) ; st.rerun()
 
-            # --- 編輯模式 UI ---
             else:
                 edit_idx = st.session_state.edit_record_idx
                 rec_type = st.session_state.edit_record_type
@@ -800,176 +796,66 @@ else:
                         st.rerun()
 
         # ==================================================
-        # 管理者專屬分頁
+        # 授權管理分頁 (依據角色開放)
         # ==================================================
-        if st.session_state.user_role == "管理者":
-            
-            with tabs[4]:
+        tab_idx_counter = 4
+        
+        # --- 📊 學生報表分頁 ---
+        if has_report_access:
+            with tabs[tab_idx_counter]:
                 st.subheader("📊 學生輔導狀況報表")
-                report_mode = st.radio("選擇產出報表類型：", ["📚 學習扶助系統", "⚠️ 學習預警系統"], horizontal=True, key="rep_stu")
                 
-                if report_mode == "📚 學習扶助系統":
-                    report_data = []
-                    for _, stu in df_students.iterrows():
-                        s_name = stu['學生姓名']
-                        s_class = str(stu.get('班別', '?'))
-                        for sub in ['國語', '英語', '數學']:
-                            teacher = str(stu.get(f'{sub}_教學者', '')).strip()
-                            if teacher and teacher != "nan":
-                                count = len(df_records[(df_records['學生姓名'] == s_name) & (df_records['授課科目'] == sub)])
-                                report_data.append({
-                                    "班別": s_class, "學生姓名": s_name, "科目": sub,
-                                    "指導教師": teacher, "紀錄筆數": count,
-                                    "狀態": "✅ 已填寫" if count > 0 else "❌ 未填寫"
-                                })
-                    df_report = pd.DataFrame(report_data)
-                    
-                    col_h1, col_dl_csv, col_dl_pdf = st.columns([3.5, 1, 1])
-                    with col_dl_csv: 
-                        csv_stu = df_report.to_csv(index=False).encode('utf-8-sig')
-                        st.download_button(label="📥 匯出 CSV", data=csv_stu, file_name="學習扶助_學生狀況.csv", mime="text/csv", use_container_width=True)
-                    with col_dl_pdf:
-                        pdf_data = generate_report_pdf(df_report, "學習扶助_學生輔導狀況", clean_sys_name)
-                        if pdf_data: st.download_button(label="📥 匯出 PDF", data=pdf_data, file_name="學習扶助_學生狀況.pdf", mime="application/pdf", use_container_width=True)
-                    
-                    classes = sorted(df_report['班別'].unique()) if not df_report.empty else []
-                    for cls in classes:
-                        with st.expander(f"🏫 【{cls}】 扶助學生列表"):
-                            df_cls = df_report[df_report['班別'] == cls]
-                            c1, c2, c3, c4, c5 = st.columns([1.5, 1, 1.5, 1.5, 1])
-                            c1.markdown("**🧑‍🎓 姓名**") ; c2.markdown("**📖 科目**") ; c3.markdown("**🧑‍🏫 指導教師**")
-                            c4.markdown("**📋 狀態**") ; c5.markdown("**🔍 操作**")
-                            st.markdown('<div style="border-bottom: 2px solid #ccc; margin-bottom: 5px;"></div>', unsafe_allow_html=True)
-                            for _, r in df_cls.iterrows():
-                                c1, c2, c3, c4, c5 = st.columns([1.5, 1, 1.5, 1.5, 1])
-                                c1.write(f"**{r['學生姓名']}**") ; c2.write(r['科目']) ; c3.write(r['指導教師'])
-                                c4.markdown(f"{r['狀態']} ({r['紀錄筆數']}筆)" if r['紀錄筆數']>0 else "<span style='color:red;'>❌ 未填寫</span>", unsafe_allow_html=True)
-                                is_expanded = False
-                                with c5:
-                                    if r['紀錄筆數'] > 0: is_expanded = st.toggle("查看", key=f"tgl_stu_sup_{cls}_{r['學生姓名']}_{r['科目']}")
-                                if is_expanded:
-                                    with st.container():
-                                        target_recs = df_records[(df_records['學生姓名'] == r['學生姓名']) & (df_records['授課科目'] == r['科目'])]
-                                        for _, row in target_recs.sort_values("輔導日期", ascending=False).iterrows():
-                                            with st.expander(f"📅 {row.get('輔導日期', row.get('診斷日期', ''))} | {row['教學內容摘要']}", expanded=True):
-                                                st.markdown(f"- **策略：** {row['教學輔導策略']}\n- **狀況：** {row['學習狀況']}")
-                                st.markdown('<div style="border-bottom: 1px dashed #eee; margin-bottom: 2px;"></div>', unsafe_allow_html=True)
-                                
+                # 依角色篩選可存取的報表模式
+                allowed_modes = []
+                if cur_role in ["管理者", "超級管理者", "扶助承辦人"]:
+                    allowed_modes.append("📚 學習扶助系統")
+                if cur_role in ["管理者", "超級管理者", "預警承辦人"]:
+                    allowed_modes.append("⚠️ 學習預警系統")
+                
+                if not allowed_modes:
+                    st.warning("⚠️ 您目前沒有可存取的學生報表類型。")
                 else:
-                    report_data = []
-                    for _, stu in df_warn_students.iterrows():
-                        s_name = stu['學生姓名']
-                        s_class = str(stu.get('班別', '?'))
-                        for sub in WARN_SUBJECTS:
-                            teacher_col = f"{sub}教學者"
-                            teacher = str(stu.get(teacher_col, '')).strip()
-                            if teacher and teacher != "nan":
-                                count = len(df_warn_records[(df_warn_records['學生姓名'] == s_name) & (df_warn_records['預警科目'] == sub) & (df_warn_records['指導教師'] == teacher)])
-                                report_data.append({
-                                    "班別": s_class, "學生姓名": s_name, "預警科目": sub,
-                                    "指導教師": teacher, "紀錄筆數": count,
-                                    "狀態": "✅ 已填寫" if count > 0 else "❌ 未填寫"
-                                })
-                    df_report_warn = pd.DataFrame(report_data)
+                    report_mode = st.radio("選擇產出報表類型：", allowed_modes, horizontal=True, key="rep_stu")
                     
-                    col_h1, col_dl_csv, col_dl_pdf = st.columns([3.5, 1, 1])
-                    with col_dl_csv:
-                        if not df_report_warn.empty:
-                            csv_stu = df_report_warn.to_csv(index=False).encode('utf-8-sig')
-                            st.download_button(label="📥 匯出 CSV", data=csv_stu, file_name="學習預警_學生狀況.csv", mime="text/csv", use_container_width=True)
-                    with col_dl_pdf:
-                        if not df_report_warn.empty:
-                            pdf_data = generate_report_pdf(df_report_warn, "學習預警_學生輔導狀況", clean_sys_name)
-                            if pdf_data: st.download_button(label="📥 匯出 PDF", data=pdf_data, file_name="學習預警_學生狀況.pdf", mime="application/pdf", use_container_width=True)
-
-                    classes = sorted(df_report_warn['班別'].unique()) if not df_report_warn.empty else []
-                    for cls in classes:
-                        with st.expander(f"🏫 【{cls}】 預警學生列表"):
-                            df_cls = df_report_warn[df_report_warn['班別'] == cls]
-                            c1, c2, c3, c4, c5 = st.columns([1.5, 1, 1.5, 1.5, 1])
-                            c1.markdown("**🧑‍🎓 姓名**") ; c2.markdown("**📖 科目**") ; c3.markdown("**🧑‍🏫 指導教師**")
-                            c4.markdown("**📋 狀態**") ; c5.markdown("**🔍 操作**")
-                            st.markdown('<div style="border-bottom: 2px solid #ccc; margin-bottom: 5px;"></div>', unsafe_allow_html=True)
-                            for _, r in df_cls.iterrows():
+                    if report_mode == "📚 學習扶助系統":
+                        report_data = []
+                        for _, stu in df_students.iterrows():
+                            s_name = stu['學生姓名']
+                            s_class = str(stu.get('班別', '?'))
+                            for sub in ['國語', '英語', '數學']:
+                                teacher = str(stu.get(f'{sub}_教學者', '')).strip()
+                                if teacher and teacher != "nan":
+                                    count = len(df_records[(df_records['學生姓名'] == s_name) & (df_records['授課科目'] == sub)])
+                                    report_data.append({
+                                        "班別": s_class, "學生姓名": s_name, "科目": sub,
+                                        "指導教師": teacher, "紀錄筆數": count,
+                                        "狀態": "✅ 已填寫" if count > 0 else "❌ 未填寫"
+                                    })
+                        df_report = pd.DataFrame(report_data)
+                        
+                        col_h1, col_dl_csv, col_dl_pdf = st.columns([3.5, 1, 1])
+                        with col_dl_csv: 
+                            csv_stu = df_report.to_csv(index=False).encode('utf-8-sig')
+                            st.download_button(label="📥 匯出 CSV", data=csv_stu, file_name="學習扶助_學生狀況.csv", mime="text/csv", use_container_width=True)
+                        with col_dl_pdf:
+                            pdf_data = generate_report_pdf(df_report, "學習扶助_學生輔導狀況", clean_sys_name)
+                            if pdf_data: st.download_button(label="📥 匯出 PDF", data=pdf_data, file_name="學習扶助_學生狀況.pdf", mime="application/pdf", use_container_width=True)
+                        
+                        classes = sorted(df_report['班別'].unique()) if not df_report.empty else []
+                        for cls in classes:
+                            with st.expander(f"🏫 【{cls}】 扶助學生列表"):
+                                df_cls = df_report[df_report['班別'] == cls]
                                 c1, c2, c3, c4, c5 = st.columns([1.5, 1, 1.5, 1.5, 1])
-                                c1.write(f"**{r['學生姓名']}**") ; c2.write(r['預警科目']) ; c3.write(r['指導教師'])
-                                c4.markdown(f"{r['狀態']} ({r['紀錄筆數']}筆)" if r['紀錄筆數']>0 else "<span style='color:red;'>❌ 未填寫</span>", unsafe_allow_html=True)
-                                is_expanded = False
-                                with c5:
-                                    if r['紀錄筆數'] > 0: is_expanded = st.toggle("查看", key=f"tgl_stu_warn_{cls}_{r['學生姓名']}_{r['預警科目']}")
-                                if is_expanded:
-                                    with st.container():
-                                        target_recs = df_warn_records[(df_warn_records['學生姓名'] == r['學生姓名']) & (df_warn_records['預警科目'] == r['預警科目'])]
-                                        for _, row in target_recs.sort_values("輔導日期", ascending=False).iterrows():
-                                            with st.expander(f"📅 {row.get('輔導日期', '')} | {row['輔導內容摘要']}", expanded=True):
-                                                st.markdown(f"- **策略：** {row['教學輔導策略']}\n- **狀況：** {row['學習狀況']}")
-                                st.markdown('<div style="border-bottom: 1px dashed #eee; margin-bottom: 2px;"></div>', unsafe_allow_html=True)
-
-            with tabs[5]:
-                st.subheader("👨‍🏫 教師填寫進度報表")
-                report_mode_tch = st.radio("選擇產出報表類型：", ["📚 學習扶助系統", "⚠️ 學習預警系統"], horizontal=True, key="rep_tch")
-                
-                # --- 扶助系統教師報表 ---
-                if report_mode_tch == "📚 學習扶助系統":
-                    report_data = []
-                    for _, stu in df_students.iterrows():
-                        s_name = stu['學生姓名']
-                        s_class = str(stu.get('班別', '?'))
-                        for sub in ['國語', '英語', '數學']:
-                            teacher = str(stu.get(f'{sub}_教學者', '')).strip()
-                            if teacher and teacher != "nan":
-                                count = len(df_records[(df_records['學生姓名'] == s_name) & (df_records['授課科目'] == sub)])
-                                report_data.append({
-                                    "班別": s_class, "學生姓名": s_name, "科目": sub,
-                                    "指導教師": teacher, "紀錄筆數": count,
-                                    "狀態": "✅ 已填寫" if count > 0 else "❌ 未填寫"
-                                })
-                    df_report = pd.DataFrame(report_data)
-                    
-                    col_h1, col_dl_csv2, col_dl_pdf2 = st.columns([3.5, 1, 1])
-                    with col_dl_csv2: 
-                        csv_tch = df_report.to_csv(index=False).encode('utf-8-sig')
-                        st.download_button(label="📥 匯出 CSV", data=csv_tch, file_name="學習扶助_教師進度.csv", mime="text/csv", use_container_width=True)
-                    with col_dl_pdf2:
-                        df_teacher_pdf = df_report.copy().sort_values(by="指導教師")[['指導教師', '班別', '學生姓名', '科目', '紀錄筆數', '狀態']]
-                        pdf_data2 = generate_report_pdf(df_teacher_pdf, "學習扶助_教師填寫進度", clean_sys_name)
-                        if pdf_data2: st.download_button(label="📥 匯出 PDF", data=pdf_data2, file_name="學習扶助_教師進度.pdf", mime="application/pdf", use_container_width=True)
-                    
-                    show_unassigned = st.checkbox("👁️ 顯示未指派學生的教師", value=True, key="chk_tch_sup")
-                    teachers_list = df_users[df_users['權限'] == '教師']['姓名'].dropna().unique().tolist()
-                    for t_name in teachers_list:
-                        df_tch = df_report[df_report['指導教師'] == t_name]
-                        if df_tch.empty:
-                            if show_unassigned:
-                                with st.expander(f"🧑‍🏫 【{t_name} 老師】 - 無指派學生"): st.info("無指派對象")
-                        else:
-                            t_email = ""
-                            if 'Email' in df_users.columns:
-                                email_match = df_users[df_users['姓名'] == t_name]['Email'].values
-                                if len(email_match) > 0 and pd.notna(email_match[0]): t_email = str(email_match[0]).strip()
-                            incomplete_count = len(df_tch[df_tch['狀態'] == "❌ 未填寫"])
-                            with st.expander(f"🧑‍🏫 【{t_name} 老師】 - 負責 {len(df_tch)} 項輔導"):
-                                if incomplete_count > 0 and t_email:
-                                    subject = f"[{sys_name}] 扶助紀錄填寫提醒"
-                                    body = f"{t_name} 老師您好：\n\n系統顯示您尚有 {incomplete_count} 筆學生「學習扶助」紀錄尚未完成，請盡速登入系統進行填報。\n\n感謝您的辛勞與配合！"
-                                    if st.button(f"✉️ 寄發 Email 提醒 ({incomplete_count}筆未填)", key=f"btn_mail_sup_{t_name}"):
-                                        with st.spinner(f"正在傳送郵件..."):
-                                            try:
-                                                resp = requests.post(GAS_MAIL_URL, json={"email": t_email, "subject": subject, "body": body})
-                                                if resp.status_code == 200 and resp.json().get("status") == "success": st.success(f"✅ 已寄出！")
-                                                else: st.error(f"❌ 失敗：{resp.text}")
-                                            except Exception as e: st.error(f"❌ 錯誤：{e}")
-                                c1, c2, c3, c4, c5 = st.columns([1.5, 1.5, 1, 1.5, 1])
-                                c1.markdown("**🏫 班別**") ; c2.markdown("**🧑‍🎓 姓名**") ; c3.markdown("**📖 科目**")
+                                c1.markdown("**🧑‍🎓 姓名**") ; c2.markdown("**📖 科目**") ; c3.markdown("**🧑‍🏫 指導教師**")
                                 c4.markdown("**📋 狀態**") ; c5.markdown("**🔍 操作**")
                                 st.markdown('<div style="border-bottom: 2px solid #ccc; margin-bottom: 5px;"></div>', unsafe_allow_html=True)
-                                for _, r in df_tch.iterrows():
-                                    c1, c2, c3, c4, c5 = st.columns([1.5, 1.5, 1, 1.5, 1])
-                                    c1.write(r['班別']) ; c2.write(f"**{r['學生姓名']}**") ; c3.write(r['科目'])
+                                for _, r in df_cls.iterrows():
+                                    c1, c2, c3, c4, c5 = st.columns([1.5, 1, 1.5, 1.5, 1])
+                                    c1.write(f"**{r['學生姓名']}**") ; c2.write(r['科目']) ; c3.write(r['指導教師'])
                                     c4.markdown(f"{r['狀態']} ({r['紀錄筆數']}筆)" if r['紀錄筆數']>0 else "<span style='color:red;'>❌ 未填寫</span>", unsafe_allow_html=True)
                                     is_expanded = False
                                     with c5:
-                                        if r['紀錄筆數'] > 0: is_expanded = st.toggle("查看", key=f"tgl_tch_sup_{t_name}_{r['班別']}_{r['學生姓名']}_{r['科目']}")
+                                        if r['紀錄筆數'] > 0: is_expanded = st.toggle("查看", key=f"tgl_stu_sup_{cls}_{r['學生姓名']}_{r['科目']}")
                                     if is_expanded:
                                         with st.container():
                                             target_recs = df_records[(df_records['學生姓名'] == r['學生姓名']) & (df_records['授課科目'] == r['科目'])]
@@ -978,79 +864,216 @@ else:
                                                     st.markdown(f"- **策略：** {row['教學輔導策略']}\n- **狀況：** {row['學習狀況']}")
                                     st.markdown('<div style="border-bottom: 1px dashed #eee; margin-bottom: 2px;"></div>', unsafe_allow_html=True)
                                     
-                # --- 預警系統教師報表 ---
-                else:
-                    report_data = []
-                    for _, stu in df_warn_students.iterrows():
-                        s_name = stu['學生姓名']
-                        s_class = str(stu.get('班別', '?'))
-                        for sub in WARN_SUBJECTS:
-                            teacher_col = f"{sub}教學者"
-                            teacher = str(stu.get(teacher_col, '')).strip()
-                            if teacher and teacher != "nan":
-                                count = len(df_warn_records[(df_warn_records['學生姓名'] == s_name) & (df_warn_records['預警科目'] == sub) & (df_warn_records['指導教師'] == teacher)])
-                                report_data.append({
-                                    "班別": s_class, "學生姓名": s_name, "科目": sub,
-                                    "指導教師": teacher, "紀錄筆數": count,
-                                    "狀態": "✅ 已填寫" if count > 0 else "❌ 未填寫"
-                                })
-                    df_report_warn = pd.DataFrame(report_data)
-                    
-                    col_h1, col_dl_csv2, col_dl_pdf2 = st.columns([3.5, 1, 1])
-                    with col_dl_csv2:
-                        if not df_report_warn.empty:
-                            csv_tch = df_report_warn.to_csv(index=False).encode('utf-8-sig')
-                            st.download_button(label="📥 匯出 CSV", data=csv_tch, file_name="學習預警_教師進度.csv", mime="text/csv", use_container_width=True)
-                    with col_dl_pdf2:
-                        if not df_report_warn.empty:
-                            df_teacher_pdf = df_report_warn.copy().sort_values(by="指導教師")[['指導教師', '班別', '學生姓名', '科目', '紀錄筆數', '狀態']]
-                            pdf_data2 = generate_report_pdf(df_teacher_pdf, "學習預警_教師填寫進度", clean_sys_name)
-                            if pdf_data2: st.download_button(label="📥 匯出 PDF", data=pdf_data2, file_name="學習預警_教師進度.pdf", mime="application/pdf", use_container_width=True)
-                    
-                    show_unassigned = st.checkbox("👁️ 顯示未指派學生的教師", value=True, key="chk_tch_warn")
-                    teachers_list = df_users[df_users['權限'] == '教師']['姓名'].dropna().unique().tolist()
-                    for t_name in teachers_list:
-                        df_tch = df_report_warn[df_report_warn['指導教師'] == t_name]
-                        if df_tch.empty:
-                            if show_unassigned:
-                                with st.expander(f"🧑‍🏫 【{t_name} 老師】 - 無指派學生"): st.info("無指派對象")
-                        else:
-                            t_email = ""
-                            if 'Email' in df_users.columns:
-                                email_match = df_users[df_users['姓名'] == t_name]['Email'].values
-                                if len(email_match) > 0 and pd.notna(email_match[0]): t_email = str(email_match[0]).strip()
-                            incomplete_count = len(df_tch[df_tch['狀態'] == "❌ 未填寫"])
-                            with st.expander(f"🧑‍🏫 【{t_name} 老師】 - 負責 {len(df_tch)} 項預警輔導"):
-                                if incomplete_count > 0 and t_email:
-                                    subject = f"[{sys_name}] 預警紀錄填寫提醒"
-                                    body = f"{t_name} 老師您好：\n\n系統顯示您尚有 {incomplete_count} 筆學生「學習預警」紀錄尚未完成，請盡速登入系統進行填報。\n\n感謝您的辛勞與配合！"
-                                    if st.button(f"✉️ 寄發 Email 提醒 ({incomplete_count}筆未填)", key=f"btn_mail_warn_{t_name}"):
-                                        with st.spinner(f"正在傳送郵件..."):
-                                            try:
-                                                resp = requests.post(GAS_MAIL_URL, json={"email": t_email, "subject": subject, "body": body})
-                                                if resp.status_code == 200 and resp.json().get("status") == "success": st.success(f"✅ 已寄出！")
-                                                else: st.error(f"❌ 失敗：{resp.text}")
-                                            except Exception as e: st.error(f"❌ 錯誤：{e}")
-                                c1, c2, c3, c4, c5 = st.columns([1.5, 1.5, 1, 1.5, 1])
-                                c1.markdown("**🏫 班別**") ; c2.markdown("**🧑‍🎓 姓名**") ; c3.markdown("**📖 科目**")
+                    elif report_mode == "⚠️ 學習預警系統":
+                        report_data = []
+                        for _, stu in df_warn_students.iterrows():
+                            s_name = stu['學生姓名']
+                            s_class = str(stu.get('班別', '?'))
+                            for sub in WARN_SUBJECTS:
+                                teacher_col = f"{sub}教學者"
+                                teacher = str(stu.get(teacher_col, '')).strip()
+                                if teacher and teacher != "nan":
+                                    count = len(df_warn_records[(df_warn_records['學生姓名'] == s_name) & (df_warn_records['預警科目'] == sub) & (df_warn_records['指導教師'] == teacher)])
+                                    report_data.append({
+                                        "班別": s_class, "學生姓名": s_name, "預警科目": sub,
+                                        "指導教師": teacher, "紀錄筆數": count,
+                                        "狀態": "✅ 已填寫" if count > 0 else "❌ 未填寫"
+                                    })
+                        df_report_warn = pd.DataFrame(report_data)
+                        
+                        col_h1, col_dl_csv, col_dl_pdf = st.columns([3.5, 1, 1])
+                        with col_dl_csv:
+                            if not df_report_warn.empty:
+                                csv_stu = df_report_warn.to_csv(index=False).encode('utf-8-sig')
+                                st.download_button(label="📥 匯出 CSV", data=csv_stu, file_name="學習預警_學生狀況.csv", mime="text/csv", use_container_width=True)
+                        with col_dl_pdf:
+                            if not df_report_warn.empty:
+                                pdf_data = generate_report_pdf(df_report_warn, "學習預警_學生輔導狀況", clean_sys_name)
+                                if pdf_data: st.download_button(label="📥 匯出 PDF", data=pdf_data, file_name="學習預警_學生狀況.pdf", mime="application/pdf", use_container_width=True)
+
+                        classes = sorted(df_report_warn['班別'].unique()) if not df_report_warn.empty else []
+                        for cls in classes:
+                            with st.expander(f"🏫 【{cls}】 預警學生列表"):
+                                df_cls = df_report_warn[df_report_warn['班別'] == cls]
+                                c1, c2, c3, c4, c5 = st.columns([1.5, 1, 1.5, 1.5, 1])
+                                c1.markdown("**🧑‍🎓 姓名**") ; c2.markdown("**📖 科目**") ; c3.markdown("**🧑‍🏫 指導教師**")
                                 c4.markdown("**📋 狀態**") ; c5.markdown("**🔍 操作**")
                                 st.markdown('<div style="border-bottom: 2px solid #ccc; margin-bottom: 5px;"></div>', unsafe_allow_html=True)
-                                for _, r in df_tch.iterrows():
-                                    c1, c2, c3, c4, c5 = st.columns([1.5, 1.5, 1, 1.5, 1])
-                                    c1.write(r['班別']) ; c2.write(f"**{r['學生姓名']}**") ; c3.write(r['科目'])
+                                for _, r in df_cls.iterrows():
+                                    c1, c2, c3, c4, c5 = st.columns([1.5, 1, 1.5, 1.5, 1])
+                                    c1.write(f"**{r['學生姓名']}**") ; c2.write(r['預警科目']) ; c3.write(r['指導教師'])
                                     c4.markdown(f"{r['狀態']} ({r['紀錄筆數']}筆)" if r['紀錄筆數']>0 else "<span style='color:red;'>❌ 未填寫</span>", unsafe_allow_html=True)
                                     is_expanded = False
                                     with c5:
-                                        if r['紀錄筆數'] > 0: is_expanded = st.toggle("查看", key=f"tgl_tch_warn_{t_name}_{r['班別']}_{r['學生姓名']}_{r['科目']}")
+                                        if r['紀錄筆數'] > 0: is_expanded = st.toggle("查看", key=f"tgl_stu_warn_{cls}_{r['學生姓名']}_{r['預警科目']}")
                                     if is_expanded:
                                         with st.container():
-                                            target_recs = df_warn_records[(df_warn_records['學生姓名'] == r['學生姓名']) & (df_warn_records['預警科目'] == r['科目'])]
+                                            target_recs = df_warn_records[(df_warn_records['學生姓名'] == r['學生姓名']) & (df_warn_records['預警科目'] == r['預警科目'])]
                                             for _, row in target_recs.sort_values("輔導日期", ascending=False).iterrows():
                                                 with st.expander(f"📅 {row.get('輔導日期', '')} | {row['輔導內容摘要']}", expanded=True):
                                                     st.markdown(f"- **策略：** {row['教學輔導策略']}\n- **狀況：** {row['學習狀況']}")
                                     st.markdown('<div style="border-bottom: 1px dashed #eee; margin-bottom: 2px;"></div>', unsafe_allow_html=True)
+            tab_idx_counter += 1
 
-            with tabs[6]:
+        # --- 👨‍🏫 教師報表分頁 ---
+        if has_report_access:
+            with tabs[tab_idx_counter]:
+                st.subheader("👨‍🏫 教師填寫進度報表")
+                
+                allowed_modes_tch = []
+                if cur_role in ["管理者", "超級管理者", "扶助承辦人"]:
+                    allowed_modes_tch.append("📚 學習扶助系統")
+                if cur_role in ["管理者", "超級管理者", "預警承辦人"]:
+                    allowed_modes_tch.append("⚠️ 學習預警系統")
+                
+                if not allowed_modes_tch:
+                    st.warning("⚠️ 您目前沒有可存取的教師進度報表類型。")
+                else:
+                    report_mode_tch = st.radio("選擇產出報表類型：", allowed_modes_tch, horizontal=True, key="rep_tch")
+                    
+                    if report_mode_tch == "📚 學習扶助系統":
+                        report_data = []
+                        for _, stu in df_students.iterrows():
+                            s_name = stu['學生姓名']
+                            s_class = str(stu.get('班別', '?'))
+                            for sub in ['國語', '英語', '數學']:
+                                teacher = str(stu.get(f'{sub}_教學者', '')).strip()
+                                if teacher and teacher != "nan":
+                                    count = len(df_records[(df_records['學生姓名'] == s_name) & (df_records['授課科目'] == sub)])
+                                    report_data.append({
+                                        "班別": s_class, "學生姓名": s_name, "科目": sub,
+                                        "指導教師": teacher, "紀錄筆數": count,
+                                        "狀態": "✅ 已填寫" if count > 0 else "❌ 未填寫"
+                                    })
+                        df_report = pd.DataFrame(report_data)
+                        
+                        col_h1, col_dl_csv2, col_dl_pdf2 = st.columns([3.5, 1, 1])
+                        with col_dl_csv2: 
+                            csv_tch = df_report.to_csv(index=False).encode('utf-8-sig')
+                            st.download_button(label="📥 匯出 CSV", data=csv_tch, file_name="學習扶助_教師進度.csv", mime="text/csv", use_container_width=True)
+                        with col_dl_pdf2:
+                            df_teacher_pdf = df_report.copy().sort_values(by="指導教師")[['指導教師', '班別', '學生姓名', '科目', '紀錄筆數', '狀態']]
+                            pdf_data2 = generate_report_pdf(df_teacher_pdf, "學習扶助_教師填寫進度", clean_sys_name)
+                            if pdf_data2: st.download_button(label="📥 匯出 PDF", data=pdf_data2, file_name="學習扶助_教師進度.pdf", mime="application/pdf", use_container_width=True)
+                        
+                        show_unassigned = st.checkbox("👁️ 顯示未指派學生的教師", value=True, key="chk_tch_sup")
+                        teachers_list = df_users[df_users['權限'] == '教師']['姓名'].dropna().unique().tolist()
+                        for t_name in teachers_list:
+                            df_tch = df_report[df_report['指導教師'] == t_name]
+                            if df_tch.empty:
+                                if show_unassigned:
+                                    with st.expander(f"🧑‍🏫 【{t_name} 老師】 - 無指派學生"): st.info("無指派對象")
+                            else:
+                                t_email = ""
+                                if 'Email' in df_users.columns:
+                                    email_match = df_users[df_users['姓名'] == t_name]['Email'].values
+                                    if len(email_match) > 0 and pd.notna(email_match[0]): t_email = str(email_match[0]).strip()
+                                incomplete_count = len(df_tch[df_tch['狀態'] == "❌ 未填寫"])
+                                with st.expander(f"🧑‍🏫 【{t_name} 老師】 - 負責 {len(df_tch)} 項輔導"):
+                                    if incomplete_count > 0 and t_email:
+                                        subject = f"[{sys_name}] 扶助紀錄填寫提醒"
+                                        body = f"{t_name} 老師您好：\n\n系統顯示您尚有 {incomplete_count} 筆學生「學習扶助」紀錄尚未完成，請盡速登入系統進行填報。\n\n感謝您的辛勞與配合！"
+                                        if st.button(f"✉️ 寄發 Email 提醒 ({incomplete_count}筆未填)", key=f"btn_mail_sup_{t_name}"):
+                                            with st.spinner(f"正在傳送郵件..."):
+                                                try:
+                                                    resp = requests.post(GAS_MAIL_URL, json={"email": t_email, "subject": subject, "body": body})
+                                                    if resp.status_code == 200 and resp.json().get("status") == "success": st.success(f"✅ 已寄出！")
+                                                    else: st.error(f"❌ 失敗：{resp.text}")
+                                                except Exception as e: st.error(f"❌ 錯誤：{e}")
+                                    c1, c2, c3, c4, c5 = st.columns([1.5, 1.5, 1, 1.5, 1])
+                                    c1.markdown("**🏫 班別**") ; c2.markdown("**🧑‍🎓 姓名**") ; c3.markdown("**📖 科目**")
+                                    c4.markdown("**📋 狀態**") ; c5.markdown("**🔍 操作**")
+                                    st.markdown('<div style="border-bottom: 2px solid #ccc; margin-bottom: 5px;"></div>', unsafe_allow_html=True)
+                                    for _, r in df_tch.iterrows():
+                                        c1, c2, c3, c4, c5 = st.columns([1.5, 1.5, 1, 1.5, 1])
+                                        c1.write(r['班別']) ; c2.write(f"**{r['學生姓名']}**") ; c3.write(r['科目'])
+                                        c4.markdown(f"{r['狀態']} ({r['紀錄筆數']}筆)" if r['紀錄筆數']>0 else "<span style='color:red;'>❌ 未填寫</span>", unsafe_allow_html=True)
+                                        is_expanded = False
+                                        with c5:
+                                            if r['紀錄筆數'] > 0: is_expanded = st.toggle("查看", key=f"tgl_tch_sup_{t_name}_{r['班別']}_{r['學生姓名']}_{r['科目']}")
+                                        if is_expanded:
+                                            with st.container():
+                                                target_recs = df_records[(df_records['學生姓名'] == r['學生姓名']) & (df_records['授課科目'] == r['科目'])]
+                                                for _, row in target_recs.sort_values("輔導日期", ascending=False).iterrows():
+                                                    with st.expander(f"📅 {row.get('輔導日期', row.get('診斷日期', ''))} | {row['教學內容摘要']}", expanded=True):
+                                                        st.markdown(f"- **策略：** {row['教學輔導策略']}\n- **狀況：** {row['學習狀況']}")
+                                        st.markdown('<div style="border-bottom: 1px dashed #eee; margin-bottom: 2px;"></div>', unsafe_allow_html=True)
+                                        
+                    elif report_mode_tch == "⚠️ 學習預警系統":
+                        report_data = []
+                        for _, stu in df_warn_students.iterrows():
+                            s_name = stu['學生姓名']
+                            s_class = str(stu.get('班別', '?'))
+                            for sub in WARN_SUBJECTS:
+                                teacher_col = f"{sub}教學者"
+                                teacher = str(stu.get(teacher_col, '')).strip()
+                                if teacher and teacher != "nan":
+                                    count = len(df_warn_records[(df_warn_records['學生姓名'] == s_name) & (df_warn_records['預警科目'] == sub) & (df_warn_records['指導教師'] == teacher)])
+                                    report_data.append({
+                                        "班別": s_class, "學生姓名": s_name, "科目": sub,
+                                        "指導教師": teacher, "紀錄筆數": count,
+                                        "狀態": "✅ 已填寫" if count > 0 else "❌ 未填寫"
+                                    })
+                        df_report_warn = pd.DataFrame(report_data)
+                        
+                        col_h1, col_dl_csv2, col_dl_pdf2 = st.columns([3.5, 1, 1])
+                        with col_dl_csv2:
+                            if not df_report_warn.empty:
+                                csv_tch = df_report_warn.to_csv(index=False).encode('utf-8-sig')
+                                st.download_button(label="📥 匯出 CSV", data=csv_tch, file_name="學習預警_教師進度.csv", mime="text/csv", use_container_width=True)
+                        with col_dl_pdf2:
+                            if not df_report_warn.empty:
+                                df_teacher_pdf = df_report_warn.copy().sort_values(by="指導教師")[['指導教師', '班別', '學生姓名', '科目', '紀錄筆數', '狀態']]
+                                pdf_data2 = generate_report_pdf(df_teacher_pdf, "學習預警_教師填寫進度", clean_sys_name)
+                                if pdf_data2: st.download_button(label="📥 匯出 PDF", data=pdf_data2, file_name="學習預警_教師進度.pdf", mime="application/pdf", use_container_width=True)
+                        
+                        show_unassigned = st.checkbox("👁️ 顯示未指派學生的教師", value=True, key="chk_tch_warn")
+                        teachers_list = df_users[df_users['權限'] == '教師']['姓名'].dropna().unique().tolist()
+                        for t_name in teachers_list:
+                            df_tch = df_report_warn[df_report_warn['指導教師'] == t_name]
+                            if df_tch.empty:
+                                if show_unassigned:
+                                    with st.expander(f"🧑‍🏫 【{t_name} 老師】 - 無指派學生"): st.info("無指派對象")
+                            else:
+                                t_email = ""
+                                if 'Email' in df_users.columns:
+                                    email_match = df_users[df_users['姓名'] == t_name]['Email'].values
+                                    if len(email_match) > 0 and pd.notna(email_match[0]): t_email = str(email_match[0]).strip()
+                                incomplete_count = len(df_tch[df_tch['狀態'] == "❌ 未填寫"])
+                                with st.expander(f"🧑‍🏫 【{t_name} 老師】 - 負責 {len(df_tch)} 項預警輔導"):
+                                    if incomplete_count > 0 and t_email:
+                                        subject = f"[{sys_name}] 預警紀錄填寫提醒"
+                                        body = f"{t_name} 老師您好：\n\n系統顯示您尚有 {incomplete_count} 筆學生「學習預警」紀錄尚未完成，請盡速登入系統進行填報。\n\n感謝您的辛勞與配合！"
+                                        if st.button(f"✉️ 寄發 Email 提醒 ({incomplete_count}筆未填)", key=f"btn_mail_warn_{t_name}"):
+                                            with st.spinner(f"正在傳送郵件..."):
+                                                try:
+                                                    resp = requests.post(GAS_MAIL_URL, json={"email": t_email, "subject": subject, "body": body})
+                                                    if resp.status_code == 200 and resp.json().get("status") == "success": st.success(f"✅ 已寄出！")
+                                                    else: st.error(f"❌ 失敗：{resp.text}")
+                                                except Exception as e: st.error(f"❌ 錯誤：{e}")
+                                    c1, c2, c3, c4, c5 = st.columns([1.5, 1.5, 1, 1.5, 1])
+                                    c1.markdown("**🏫 班別**") ; c2.markdown("**🧑‍🎓 姓名**") ; c3.markdown("**📖 科目**")
+                                    c4.markdown("**📋 狀態**") ; c5.markdown("**🔍 操作**")
+                                    st.markdown('<div style="border-bottom: 2px solid #ccc; margin-bottom: 5px;"></div>', unsafe_allow_html=True)
+                                    for _, r in df_tch.iterrows():
+                                        c1, c2, c3, c4, c5 = st.columns([1.5, 1.5, 1, 1.5, 1])
+                                        c1.write(r['班別']) ; c2.write(f"**{r['學生姓名']}**") ; c3.write(r['科目'])
+                                        c4.markdown(f"{r['狀態']} ({r['紀錄筆數']}筆)" if r['紀錄筆數']>0 else "<span style='color:red;'>❌ 未填寫</span>", unsafe_allow_html=True)
+                                        is_expanded = False
+                                        with c5:
+                                            if r['紀錄筆數'] > 0: is_expanded = st.toggle("查看", key=f"tgl_tch_warn_{t_name}_{r['班別']}_{r['學生姓名']}_{r['科目']}")
+                                        if is_expanded:
+                                            with st.container():
+                                                target_recs = df_warn_records[(df_warn_records['學生姓名'] == r['學生姓名']) & (df_warn_records['預警科目'] == r['科目'])]
+                                                for _, row in target_recs.sort_values("輔導日期", ascending=False).iterrows():
+                                                    with st.expander(f"📅 {row.get('輔導日期', '')} | {row['輔導內容摘要']}", expanded=True):
+                                                        st.markdown(f"- **策略：** {row['教學輔導策略']}\n- **狀況：** {row['學習狀況']}")
+                                        st.markdown('<div style="border-bottom: 1px dashed #eee; margin-bottom: 2px;"></div>', unsafe_allow_html=True)
+            tab_idx_counter += 1
+
+        # --- ⚙️ 系統設定分頁 ---
+        if has_sys_settings_access:
+            with tabs[tab_idx_counter]:
                 st.subheader("⚙️ 系統基本設定")
                 with st.form("settings_form"):
                     new_sys_name = st.text_input("學校名稱 / 系統標題", value=sys_name)
@@ -1169,7 +1192,7 @@ else:
                     with c_name: n_name = st.text_input("姓名 (必填)")
                     
                     c_role, c_email, c_space = st.columns(3)
-                    with c_role: n_role = st.selectbox("權限", ["教師", "管理者"])
+                    with c_role: n_role = st.selectbox("權限", ["教師", "扶助承辦人", "預警承辦人", "管理者"])
                     with c_email: n_email = st.text_input("Email (選填)")
                     
                     if st.form_submit_button("新增帳號"):
@@ -1207,9 +1230,9 @@ else:
                         
                         e_c4, e_c5, e_c6 = st.columns(3)
                         with e_c4: 
-                            roles = ["教師", "管理者"]
-                            cur_role = selected_user.get('權限', '教師')
-                            default_r_idx = roles.index(cur_role) if cur_role in roles else 0
+                            roles = ["教師", "扶助承辦人", "預警承辦人", "管理者", "超級管理者"]
+                            cur_role_val = selected_user.get('權限', '教師')
+                            default_r_idx = roles.index(cur_role_val) if cur_role_val in roles else 0
                             e_role = st.selectbox("權限", roles, index=default_r_idx)
                         with e_c5: 
                             e_email = st.text_input("Email", value=selected_user.get('Email', ''))
