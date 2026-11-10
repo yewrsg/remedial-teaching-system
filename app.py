@@ -25,77 +25,143 @@ st.markdown("""
     /* 全域間距調整 */
     .block-container { padding-top: 1rem !important; padding-bottom: 2rem !important; max-width: 1100px; }
     
-    /* 頂部 Hero Banner 橫幅 styling - 完整矩形圓角卡片 */
-    .hero-banner {
-        background: linear-gradient(135deg, #16325c 0%, #1b3e6f 100%);
-        color: #ffffff;
-        padding: 24px 32px;
-        border-radius: 12px;
-        margin-bottom: 20px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-        display: block;
-        width: 100%;
-        box-sizing: border-box;
+    /* 登入首頁：方案 C－簡約清爽資訊風 */
+    .login-home-marker { height: 0; margin: 0; padding: 0; }
+    .login-brand-row {
+        display: flex;
+        align-items: center;
+        gap: 20px;
+        margin: 0 0 18px 0;
     }
-    .hero-school-header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.2); padding-bottom: 12px; }
-    .hero-school-icon { background-color: #ffffff; border-radius: 8px; width: 42px; height: 42px; display: flex; align-items: center; justify-content: center; font-size: 22px; }
-    .hero-school-text { display: flex; flex-direction: column; }
-    .hero-school-name { font-size: 1.25rem; font-weight: 700; letter-spacing: 1px; color: #ffffff; margin: 0; line-height: 1.2; }
-    .hero-school-en { font-size: 0.75rem; color: #cbd5e1; letter-spacing: 0.5px; margin-top: 2px; }
-    .hero-sys-title { font-size: 1.85rem; font-weight: 700; margin: 0; padding: 0; color: #ffffff; letter-spacing: 0.5px; }
-    .hero-sys-en { font-size: 0.88rem; color: #e2e8f0; margin-top: 4px; }
-
-    /* 最新消息視覺優化 - 緊縮行距 5pt 與版面排版 */
-    .news-header-wrap { display: flex; justify-content: space-between; align-items: center; margin-top: 20px; margin-bottom: 8px; }
-    .news-header-title { font-size: 1.2rem; font-weight: 700; color: #1e293b; display: flex; align-items: center; gap: 8px; }
-    
-    .news-item-card { 
-        background-color: #f8fafc; 
-        border-radius: 8px; 
-        padding: 8px 16px; 
-        margin-bottom: 5pt !important; 
-        border: 1px solid #f1f5f9; 
+    .login-school-logo {
+        display: block;
+        width: 88px;
+        height: 88px;
+        flex: 0 0 88px;
+        object-fit: contain;
+    }
+    .login-brand {
+        flex: 1 1 auto;
+        min-width: 0;
+        padding: 8px 0 16px 0;
+        border-bottom: 2px solid #c6a15b;
+    }
+    .login-school-name {
+        color: #16325c;
+        font-size: 1.35rem;
+        font-weight: 750;
+        letter-spacing: 1px;
+        line-height: 1.35;
+        margin: 0 0 3px 0;
+    }
+    .login-school-en {
+        color: #64748b;
+        font-size: 0.72rem;
+        letter-spacing: 1.1px;
+        margin: 0 0 10px 0;
+    }
+    .login-system-name {
+        color: #16325c;
+        font-size: 1.45rem;
+        font-weight: 700;
+        line-height: 1.45;
+        margin: 0;
+    }
+    .login-system-en {
+        color: #64748b;
+        font-size: 0.82rem;
+        margin-top: 3px;
+    }
+    .login-news-panel { margin-top: 10px; }
+    .login-news-heading {
+        color: #16325c;
+        font-size: 1.12rem;
+        font-weight: 750;
+        padding: 0 0 10px 0;
+        margin: 0 0 12px 0;
+        border-bottom: 1px solid #d9dee7;
+    }
+    .login-news-list {
+        max-height: 690px;
+        overflow-y: auto;
+        padding-right: 5px;
+    }
+    .news-item-card {
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-left: 3px solid #c6a15b;
+        border-radius: 5px;
+        padding: 13px 15px;
+        margin: 0 0 10px 0;
     }
     .news-item-title-wrap {
         display: flex;
-        align-items: center;
-        gap: 12px;
-        margin-bottom: 5pt !important;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 5px 12px;
+        margin-bottom: 7px;
     }
-    .news-item-title { 
-        font-size: 1.05rem; 
-        font-weight: 700; 
-        color: #0f172a; 
-        margin: 0;
-        line-height: 1.2;
-    }
-    .news-item-date { 
-        font-size: 1.05rem; 
+    .news-item-title {
+        color: #16325c;
+        font-size: 0.98rem;
         font-weight: 700;
-        color: #0f172a; 
-    }
-    .news-item-body { 
-        font-size: 0.9rem; 
-        color: #475569; 
-        line-height: 1.2;
+        line-height: 1.5;
         margin: 0;
-        padding-top: 0px;
+    }
+    .news-item-date {
+        color: #7b8492;
+        font-size: 0.78rem;
+        white-space: nowrap;
+    }
+    .news-item-body {
+        color: #475569;
+        font-size: 0.88rem;
+        line-height: 1.65;
+        margin: 0;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+    }
+    .login-news-empty {
+        color: #64748b;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        border-radius: 5px;
+        padding: 18px;
+        font-size: 0.9rem;
     }
 
-    /* 登入卡片 styling */
+    /* 登入卡片 */
     .login-container {
         background-color: #ffffff;
-        border: 1px solid #e2e8f0;
-        border-radius: 16px;
-        padding: 32px 40px;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.05);
-        margin-top: 20px;
+        border: 1px solid #dce2ea;
+        border-top: 3px solid #c6a15b;
+        border-radius: 7px;
+        padding: 28px 28px;
+        box-shadow: 0 2px 10px rgba(15, 23, 42, 0.045);
+        margin-top: 10px;
         margin-bottom: 30px;
     }
     .login-header { text-align: center; margin-bottom: 24px; }
-    .login-icon { font-size: 32px; color: #1b3e6f; margin-bottom: 6px; }
-    .login-title { font-size: 1.4rem; font-weight: 700; color: #0f172a; margin: 0; }
-    .login-subtitle { font-size: 0.88rem; color: #64748b; margin-top: 4px; }
+    .login-icon { font-size: 29px; color: #16325c; margin-bottom: 6px; }
+    .login-title { font-size: 1.35rem; font-weight: 700; color: #16325c; margin: 0; }
+    .login-subtitle { font-size: 0.88rem; color: #64748b; margin-top: 5px; }
+
+    /* 登入頁窄螢幕調整；只在未登入首頁生效 */
+    @media (max-width: 760px) {
+        .stApp:has(.login-home-marker) div[data-testid="stHorizontalBlock"]:has(.login-news-panel) {
+            flex-direction: column !important;
+            gap: 1rem !important;
+        }
+        .stApp:has(.login-home-marker) div[data-testid="stHorizontalBlock"]:has(.login-news-panel) > div[data-testid="column"] {
+            width: 100% !important;
+            flex: 1 1 100% !important;
+        }
+        .login-container { padding: 24px 18px; }
+        .login-brand-row { gap: 12px; }
+        .login-school-logo { width: 64px; height: 64px; flex-basis: 64px; }
+        .login-system-name { font-size: 1.22rem; }
+        .login-news-list { max-height: 420px; }
+    }
     
     /* 頁尾 */
     .sys-footer { text-align: center; color: #64748b; font-size: 0.82rem; margin-top: 40px; margin-bottom: 20px; line-height: 1.6; }
@@ -325,46 +391,48 @@ if "reset_account" not in st.session_state: st.session_state.reset_account = ""
 if not st.session_state.logged_in:
     apply_bg_color("純白") 
     
-    # 頂部 Hero Banner - 完整矩形圓角卡片
+    # 方案 C：白色校務識別頁首，直接顯示 Settings 中原有的校徽資料
+    st.markdown('<div class="login-home-marker"></div>', unsafe_allow_html=True)
+    logo_html = ""
+    if isinstance(sys_logo, str) and sys_logo.startswith("data:image"):
+        logo_html = f'<img class="login-school-logo" src="{sys_logo}" alt="文昌國小校徽">'
     st.markdown(f"""
-        <div class="hero-banner">
-            <div class="hero-school-header">
-                <div class="hero-school-icon">🏫</div>
-                <div class="hero-school-text">
-                    <div class="hero-school-name">{sys_name}</div>
-                    <div class="hero-school-en">WUN CHANG ELEMENTARY SCHOOL</div>
-                </div>
+        <div class="login-brand-row">
+            {logo_html}
+            <div class="login-brand">
+                <div class="login-school-name">{sys_name}</div>
+                <div class="login-school-en">WUN CHANG ELEMENTARY SCHOOL</div>
+                <div class="login-system-name">學習扶助教學輔導登錄系統</div>
+                <div class="login-system-en">Learning Support &amp; Teaching Guidance System</div>
             </div>
-            <div class="hero-sys-title">學習扶助教學輔導登錄系統</div>
-            <div class="hero-sys-en">Learning Support & Teaching Guidance System</div>
         </div>
     """, unsafe_allow_html=True)
-    
-    # 最新消息區塊標題（已移除右側「系統公告」）
-    st.markdown("""
-        <div class="news-header-wrap">
-            <div class="news-header-title">📢 最新消息 / NEWS</div>
-        </div>
-    """, unsafe_allow_html=True)
-    
-    # 最新消息列表 (緊縮行距至 5pt, 移除標籤, 日期緊跟標題後方)
-    if df_news.empty:
-        st.info("目前尚無公告。")
-    else:
-        for _, n in df_news.sort_values("日期", ascending=False).head(3).iterrows():
-            st.markdown(f"""
-                <div class="news-item-card">
-                    <div class="news-item-title-wrap">
-                        <span class="news-item-title">{n.get('標題', '')}</span>
-                        <span class="news-item-date">{n.get('日期', '')}</span>
+
+    # 公告與登入採左右分欄；完整呈現 News 工作表內所有公告，不再只顯示前三筆
+    col_news, col_login = st.columns([1.15, 0.85], gap="large")
+    with col_news:
+        news_html = [
+            '<div class="login-news-panel">',
+            '<div class="login-news-heading">最新消息 <span style="font-size:0.72rem;font-weight:500;color:#8490a0;letter-spacing:1px;">NEWS &amp; ANNOUNCEMENTS</span></div>',
+            '<div class="login-news-list">'
+        ]
+        if df_news.empty:
+            news_html.append('<div class="login-news-empty">目前尚無公告。</div>')
+        else:
+            for _, n in df_news.sort_values("日期", ascending=False).iterrows():
+                news_html.append(f"""
+                    <div class="news-item-card">
+                        <div class="news-item-title-wrap">
+                            <span class="news-item-title">{n.get('標題', '')}</span>
+                            <span class="news-item-date">{n.get('日期', '')}</span>
+                        </div>
+                        <div class="news-item-body">{n.get('內容', '')}</div>
                     </div>
-                    <div class="news-item-body">{n.get('內容', '')}</div>
-                </div>
-            """, unsafe_allow_html=True)
-            
-    # 使用者登入卡片
-    col_l, col_main, col_r = st.columns([1, 6, 1])
-    with col_main:
+                """)
+        news_html.extend(['</div>', '</div>'])
+        st.markdown("".join(news_html), unsafe_allow_html=True)
+
+    with col_login:
         st.markdown('<div class="login-container">', unsafe_allow_html=True)
         
         # 模式 1：標準登入
