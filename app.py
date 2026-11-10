@@ -16,7 +16,7 @@ import requests
 from fpdf import FPDF  
 
 # ==========================================
-# 0. 基本設定與 CSS 美化 (優化公告行距與排版)
+# 0. 基本設定與 CSS 美化 (依據最新版面需求調整)
 # ==========================================
 st.set_page_config(page_title="學習扶助教學輔導登錄系統", layout="wide", page_icon="🏫")
 
@@ -25,7 +25,7 @@ st.markdown("""
     /* 全域間距調整 */
     .block-container { padding-top: 1rem !important; padding-bottom: 2rem !important; max-width: 1100px; }
     
-    /* 頂部 Hero Banner 橫幅 styling */
+    /* 頂部 Hero Banner 橫幅 styling - 完整矩形圓角卡片 */
     .hero-banner {
         background: linear-gradient(135deg, #16325c 0%, #1b3e6f 100%);
         color: #ffffff;
@@ -33,6 +33,9 @@ st.markdown("""
         border-radius: 12px;
         margin-bottom: 20px;
         box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        display: block;
+        width: 100%;
+        box-sizing: border-box;
     }
     .hero-school-header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.2); padding-bottom: 12px; }
     .hero-school-icon { background-color: #ffffff; border-radius: 8px; width: 42px; height: 42px; display: flex; align-items: center; justify-content: center; font-size: 22px; }
@@ -42,30 +45,29 @@ st.markdown("""
     .hero-sys-title { font-size: 1.85rem; font-weight: 700; margin: 0; padding: 0; color: #ffffff; letter-spacing: 0.5px; }
     .hero-sys-en { font-size: 0.88rem; color: #e2e8f0; margin-top: 4px; }
 
-    /* 最新消息視覺優化 - 緊縮行距與版面 */
+    /* 最新消息視覺優化 - 緊縮行距 5pt 與版面排版 */
     .news-header-wrap { display: flex; justify-content: space-between; align-items: center; margin-top: 20px; margin-bottom: 8px; }
     .news-header-title { font-size: 1.2rem; font-weight: 700; color: #1e293b; display: flex; align-items: center; gap: 8px; }
-    .news-header-sub { font-size: 0.85rem; color: #64748b; }
     
     .news-item-card { 
         background-color: #f8fafc; 
         border-radius: 8px; 
-        padding: 10px 16px; 
-        margin-bottom: 8px; 
+        padding: 8px 16px; 
+        margin-bottom: 5pt !important; 
         border: 1px solid #f1f5f9; 
     }
     .news-item-title-wrap {
         display: flex;
         align-items: center;
         gap: 12px;
-        margin-bottom: 2px;
+        margin-bottom: 5pt !important;
     }
     .news-item-title { 
         font-size: 1.05rem; 
         font-weight: 700; 
         color: #0f172a; 
         margin: 0;
-        line-height: 1.3;
+        line-height: 1.2;
     }
     .news-item-date { 
         font-size: 1.05rem; 
@@ -75,8 +77,9 @@ st.markdown("""
     .news-item-body { 
         font-size: 0.9rem; 
         color: #475569; 
-        line-height: 1.3;
+        line-height: 1.2;
         margin: 0;
+        padding-top: 0px;
     }
 
     /* 登入卡片 styling */
@@ -322,7 +325,7 @@ if "reset_account" not in st.session_state: st.session_state.reset_account = ""
 if not st.session_state.logged_in:
     apply_bg_color("純白") 
     
-    # 頂部 Hero Banner
+    # 頂部 Hero Banner - 完整矩形圓角卡片
     st.markdown(f"""
         <div class="hero-banner">
             <div class="hero-school-header">
@@ -337,15 +340,14 @@ if not st.session_state.logged_in:
         </div>
     """, unsafe_allow_html=True)
     
-    # 最新消息區塊標題
+    # 最新消息區塊標題（已移除右側「系統公告」）
     st.markdown("""
         <div class="news-header-wrap">
             <div class="news-header-title">📢 最新消息 / NEWS</div>
-            <div class="news-header-sub">系統公告</div>
         </div>
     """, unsafe_allow_html=True)
     
-    # 最新消息列表 (需求 1, 2, 3: 緊縮行距, 移除最新公告圖示, 日期標示於標題後方)
+    # 最新消息列表 (緊縮行距至 5pt, 移除標籤, 日期緊跟標題後方)
     if df_news.empty:
         st.info("目前尚無公告。")
     else:
@@ -510,7 +512,7 @@ if not st.session_state.logged_in:
                 
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # 需求 4: 取得超級管理者的 Email 並在頁尾加上 mailto 連結
+    # 取得超級管理者的 Email 並在頁尾加上 mailto 連結
     admin_email = ""
     try:
         df_users_footer = conn.read(spreadsheet=SHEET_URL, worksheet="Users", ttl=600).dropna(how="all")
