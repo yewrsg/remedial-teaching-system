@@ -762,6 +762,9 @@ else:
             tabs_list.extend(["📊 學生報表", "👨‍🏫 教師報表"])
         if has_sys_settings_access:
             tabs_list.append("⚙️ 系統設定")
+        has_roster_upload_access = cur_role in ["扶助承辦人", "預警承辦人"]
+        if has_roster_upload_access:
+            tabs_list.append("📥 學生名單匯入")
         
         # 改用單選導覽：只執行目前所選功能的程式碼（st.tabs 每次都會把所有分頁全部執行一遍）
         active_tab = st.radio("功能選單", tabs_list, horizontal=True, key="main_nav", label_visibility="collapsed")
@@ -1466,6 +1469,64 @@ else:
                                                         st.markdown(f"- **策略：** {row['教學輔導策略']}\n- **狀況：** {row['學習狀況']}")
                                         st.markdown('<div style="border-bottom: 1px dashed #eee; margin-bottom: 2px;"></div>', unsafe_allow_html=True)
             tab_idx_counter += 1
+
+        # --- 📥 學生名單匯入分頁（扶助承辦人 / 預警承辦人專用）---
+        if has_roster_upload_access:
+            if active_tab == "📥 學生名單匯入":
+                st.subheader("📥 學生名單匯入")
+
+                # 依角色鎖定可匯入的名單：扶助承辦人只能匯入扶助學生，預警承辦人只能匯入預警學生
+                if cur_role == "扶助承辦人":
+                    roster_label, roster_sheet, roster_now = "扶助學生", "Students", df_students
+                    if roster_now.empty:
+                        roster_sample_cols = ["班別", "學生姓名", "國語_教學者", "國語_成績", "英語_教學者", "英語_成績", "數學_教學者", "數學_成績"]
+                    else:
+                        roster_sample_cols = list(roster_now.columns)
+                else:
+                    roster_label, roster_sheet, roster_now = "預警學生", "Warning_Students", df_warn_students
+                    roster_sample_cols = WARN_STUDENT_COLS
+
+                st.info(f"💡 匯入後將以上傳的名單**整份取代**目前的【{roster_label}】名單（目前系統內有 {len(roster_now)} 筆）。建議先下載範例檔，確認欄位格式後再上傳。")
+
+                st.write(f"**1. 下載【{roster_label}】範例檔**")
+                st.download_button(
+                    f"📥 下載【{roster_label}】範例",
+                    data=pd.DataFrame(columns=roster_sample_cols).to_csv(index=False).encode('utf-8-sig'),
+                    file_name=f"{roster_label}_範例.csv", mime="text/csv", key="roster_sample_dl"
+                )
+
+                st.write(f"**2. 匯入【{roster_label}】名單**")
+                roster_file = st.file_uploader(f"上傳【{roster_label}】名單 (CSV)", type=["csv"], key="roster_upload")
+                if roster_file and st.button(f"💾 更新{roster_label}", key="roster_upload_btn"):
+                    raw_bytes = roster_file.getvalue()
+                    new_roster_df = None
+                    for enc in ("utf-8-sig", "big5"):
+                        try:
+                            new_roster_df = pd.read_csv(io.BytesIO(raw_bytes), encoding=enc)
+                            break
+                        except Exception:
+                            continue
+                    if new_roster_df is None:
+                        st.error("❌ 無法讀取檔案，請確認為 CSV 格式（UTF-8 或 Big5 編碼）。")
+                    else:
+                        new_roster_df = new_roster_df.dropna(how="all")
+                        new_roster_df.columns = [str(c).strip() for c in new_roster_df.columns]
+                        missing_cols = [c for c in ["班別", "學生姓名"] if c not in new_roster_df.columns]
+                        if missing_cols:
+                            st.error(f"❌ 檔案缺少必要欄位：{'、'.join(missing_cols)}。請參考範例檔的欄位名稱。")
+                        elif new_roster_df.empty:
+                            st.error("❌ 檔案內沒有任何學生資料。")
+                        else:
+                            roster_saved = False
+                            try:
+                                with st.spinner("更新中..."):
+                                    write_sheet(roster_sheet, new_roster_df)
+                                roster_saved = True
+                            except Exception as e:
+                                st.error(f"❌ 更新失敗：{e}")
+                            if roster_saved:
+                                flash(f"✅ 已更新{roster_label}名單，共 {len(new_roster_df)} 筆！")
+                                st.rerun()
 
         # --- ⚙️ 系統設定分頁 ---
         if has_sys_settings_access:
