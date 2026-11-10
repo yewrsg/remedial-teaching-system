@@ -16,7 +16,7 @@ import requests
 from fpdf import FPDF  
 
 # ==========================================
-# 0. 基本設定與 CSS 美化 (依據附圖視覺優化)
+# 0. 基本設定與 CSS 美化 (優化公告行距與排版)
 # ==========================================
 st.set_page_config(page_title="學習扶助教學輔導登錄系統", layout="wide", page_icon="🏫")
 
@@ -42,15 +42,42 @@ st.markdown("""
     .hero-sys-title { font-size: 1.85rem; font-weight: 700; margin: 0; padding: 0; color: #ffffff; letter-spacing: 0.5px; }
     .hero-sys-en { font-size: 0.88rem; color: #e2e8f0; margin-top: 4px; }
 
-    /* 最新消息視覺優化 */
-    .news-header-wrap { display: flex; justify-content: space-between; align-items: center; margin-top: 24px; margin-bottom: 12px; }
-    .news-header-title { font-size: 1.25rem; font-weight: 700; color: #1e293b; display: flex; align-items: center; gap: 8px; }
+    /* 最新消息視覺優化 - 緊縮行距與版面 */
+    .news-header-wrap { display: flex; justify-content: space-between; align-items: center; margin-top: 20px; margin-bottom: 8px; }
+    .news-header-title { font-size: 1.2rem; font-weight: 700; color: #1e293b; display: flex; align-items: center; gap: 8px; }
     .news-header-sub { font-size: 0.85rem; color: #64748b; }
-    .news-item-card { background-color: #f8fafc; border-radius: 10px; padding: 16px 20px; margin-bottom: 12px; border: 1px solid #f1f5f9; }
-    .news-item-tag { display: inline-block; background-color: #dcfce7; color: #15803d; font-size: 0.75rem; font-weight: 600; padding: 3px 10px; border-radius: 12px; margin-right: 8px; }
-    .news-item-date { font-size: 0.82rem; color: #64748b; }
-    .news-item-title { font-size: 1.1rem; font-weight: 700; color: #0f172a; margin-top: 6px; margin-bottom: 4px; }
-    .news-item-body { font-size: 0.92rem; color: #475569; }
+    
+    .news-item-card { 
+        background-color: #f8fafc; 
+        border-radius: 8px; 
+        padding: 10px 16px; 
+        margin-bottom: 8px; 
+        border: 1px solid #f1f5f9; 
+    }
+    .news-item-title-wrap {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 2px;
+    }
+    .news-item-title { 
+        font-size: 1.05rem; 
+        font-weight: 700; 
+        color: #0f172a; 
+        margin: 0;
+        line-height: 1.3;
+    }
+    .news-item-date { 
+        font-size: 1.05rem; 
+        font-weight: 700;
+        color: #0f172a; 
+    }
+    .news-item-body { 
+        font-size: 0.9rem; 
+        color: #475569; 
+        line-height: 1.3;
+        margin: 0;
+    }
 
     /* 登入卡片 styling */
     .login-container {
@@ -69,6 +96,7 @@ st.markdown("""
     
     /* 頁尾 */
     .sys-footer { text-align: center; color: #64748b; font-size: 0.82rem; margin-top: 40px; margin-bottom: 20px; line-height: 1.6; }
+    .sys-footer a { color: #1b3e6f; text-decoration: underline; font-weight: 600; }
     
     /* Streamlit 按鈕外觀客製 */
     div.stButton > button[kind="primary"] {
@@ -289,12 +317,12 @@ if "reset_code" not in st.session_state: st.session_state.reset_code = ""
 if "reset_account" not in st.session_state: st.session_state.reset_account = ""
 
 # ==========================================
-# 畫面區塊 1：登入與忘記密碼介面 (優化首頁視覺)
+# 畫面區塊 1：登入與忘記密碼介面 (優化首頁視覺與版面)
 # ==========================================
 if not st.session_state.logged_in:
     apply_bg_color("純白") 
     
-    # 頂部 Hero Banner (對齊圖片樣式)
+    # 頂部 Hero Banner
     st.markdown(f"""
         <div class="hero-banner">
             <div class="hero-school-header">
@@ -309,7 +337,7 @@ if not st.session_state.logged_in:
         </div>
     """, unsafe_allow_html=True)
     
-    # 最新消息區塊 (對齊圖片排版)
+    # 最新消息區塊標題
     st.markdown("""
         <div class="news-header-wrap">
             <div class="news-header-title">📢 最新消息 / NEWS</div>
@@ -317,22 +345,22 @@ if not st.session_state.logged_in:
         </div>
     """, unsafe_allow_html=True)
     
+    # 最新消息列表 (需求 1, 2, 3: 緊縮行距, 移除最新公告圖示, 日期標示於標題後方)
     if df_news.empty:
         st.info("目前尚無公告。")
     else:
         for _, n in df_news.sort_values("日期", ascending=False).head(3).iterrows():
             st.markdown(f"""
                 <div class="news-item-card">
-                    <div>
-                        <span class="news-item-tag">最新公告</span>
+                    <div class="news-item-title-wrap">
+                        <span class="news-item-title">{n.get('標題', '')}</span>
                         <span class="news-item-date">{n.get('日期', '')}</span>
                     </div>
-                    <div class="news-item-title">{n.get('標題', '')}</div>
                     <div class="news-item-body">{n.get('內容', '')}</div>
                 </div>
             """, unsafe_allow_html=True)
             
-    # 使用者登入卡片 (對齊圖片樣式與忘記密碼機制)
+    # 使用者登入卡片
     col_l, col_main, col_r = st.columns([1, 6, 1])
     with col_main:
         st.markdown('<div class="login-container">', unsafe_allow_html=True)
@@ -423,12 +451,10 @@ if not st.session_state.logged_in:
                                     if not target_email or target_email == 'nan':
                                         st.error("❌ 此帳號未設定 Email，無法寄送驗證碼，請洽系統管理者。")
                                     else:
-                                        # 產生 6 位數隨機數字驗證碼
                                         v_code = ''.join(random.choices(string.digits, k=6))
                                         st.session_state.reset_code = v_code
                                         st.session_state.reset_account = user_info['帳號']
                                         
-                                        # 呼叫 GAS Mail API 寄發信件
                                         subject = f"[{sys_name}] 密碼重置認證碼"
                                         body = f"{user_info['姓名']} 老師您好：\n\n您正在進行密碼重置，您的驗證碼為：【 {v_code} 】\n請在頁面輸入此驗證碼以完成密碼變更。\n\n若非本人操作請忽略此信件。"
                                         
@@ -484,11 +510,25 @@ if not st.session_state.logged_in:
                 
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # 頁尾資訊 (對齊圖片設計)
+    # 需求 4: 取得超級管理者的 Email 並在頁尾加上 mailto 連結
+    admin_email = ""
+    try:
+        df_users_footer = conn.read(spreadsheet=SHEET_URL, worksheet="Users", ttl=600).dropna(how="all")
+        admin_match = df_users_footer[df_users_footer['權限'].isin(['超級管理者', '管理者'])]
+        if not admin_match.empty and 'Email' in admin_match.columns:
+            valid_emails = admin_match['Email'].dropna().tolist()
+            if valid_emails:
+                admin_email = str(valid_emails[0]).strip()
+    except Exception:
+        admin_email = ""
+        
+    footer_unit_html = f'<a href="mailto:{admin_email}">系統管理單位</a>' if admin_email else "系統管理單位"
+
+    # 頁尾資訊
     st.markdown(f"""
         <div class="sys-footer">
             臺中市北屯區文昌國民小學<br>
-            學習扶助教學輔導登錄平台 | 系統管理單位
+            學習扶助教學輔導登錄平台 | {footer_unit_html}
         </div>
     """, unsafe_allow_html=True)
 
