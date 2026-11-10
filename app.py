@@ -7,6 +7,7 @@ from google.oauth2 import service_account
 import io
 import time
 import threading
+import html as _html
 import base64
 import re
 import random
@@ -131,17 +132,6 @@ st.markdown("""
         font-size: 0.9rem;
     }
 
-    /* 登入卡片 */
-    .login-container {
-        background-color: #ffffff;
-        border: 1px solid #dce2ea;
-        border-top: 3px solid #c6a15b;
-        border-radius: 7px;
-        padding: 28px 28px;
-        box-shadow: 0 2px 10px rgba(15, 23, 42, 0.045);
-        margin-top: 10px;
-        margin-bottom: 30px;
-    }
     .login-header { text-align: center; margin-bottom: 24px; }
     .login-icon { font-size: 29px; color: #16325c; margin-bottom: 6px; }
     .login-title { font-size: 1.35rem; font-weight: 700; color: #16325c; margin: 0; }
@@ -157,7 +147,6 @@ st.markdown("""
             width: 100% !important;
             flex: 1 1 100% !important;
         }
-        .login-container { padding: 24px 18px; }
         .login-brand-row { gap: 12px; }
         .login-school-logo { width: 64px; height: 64px; flex-basis: 64px; }
         .login-system-name { font-size: 1.22rem; }
@@ -203,6 +192,19 @@ def apply_bg_color(subject):
 
 # Streamlit 1.37+ 支援 fragment（局部重跑）；舊版自動退回為一般函式
 _fragment = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None) or (lambda f: f)
+
+def safe_html_text(value):
+    """公告文字轉成可安全嵌入 HTML 的單行字串：
+    跳脫特殊字元，並把換行改成 <br>，避免空白行或縮排讓 Markdown 把 HTML 當成程式碼區塊"""
+    try:
+        if value is None or pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, pd.Timestamp):
+        value = value.strftime("%Y/%m/%d")
+    text = _html.escape(str(value).strip())
+    return text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br>")
 
 def flash(message, icon=None):
     """先記下訊息，rerun 之後再顯示（取代 toast + time.sleep 的人為等待）"""
@@ -526,20 +528,19 @@ if not st.session_state.logged_in:
             news_html.append('<div class="login-news-empty">目前尚無公告。</div>')
         else:
             for _, n in df_news.sort_values("日期", ascending=False).iterrows():
-                news_html.append(f"""
-                    <div class="news-item-card">
-                        <div class="news-item-title-wrap">
-                            <span class="news-item-title">{n.get('標題', '')}</span>
-                            <span class="news-item-date">{n.get('日期', '')}</span>
-                        </div>
-                        <div class="news-item-body">{n.get('內容', '')}</div>
-                    </div>
-                """)
+                news_html.append(
+                    '<div class="news-item-card">'
+                    '<div class="news-item-title-wrap">'
+                    f'<span class="news-item-title">{safe_html_text(n.get("標題", ""))}</span>'
+                    f'<span class="news-item-date">{safe_html_text(n.get("日期", ""))}</span>'
+                    '</div>'
+                    f'<div class="news-item-body">{safe_html_text(n.get("內容", ""))}</div>'
+                    '</div>'
+                )
         news_html.extend(['</div>', '</div>'])
         st.markdown("".join(news_html), unsafe_allow_html=True)
 
     with col_login:
-        st.markdown('<div class="login-container">', unsafe_allow_html=True)
         
         # 模式 1：標準登入
         if not st.session_state.reset_mode:
@@ -680,7 +681,6 @@ if not st.session_state.logged_in:
                 st.session_state.reset_account = ""
                 st.rerun()
                 
-        st.markdown('</div>', unsafe_allow_html=True)
 
     # 取得超級管理者的 Email 並在頁尾加上 mailto 連結
     admin_email = ""
