@@ -8,24 +8,77 @@ import io
 import time
 import base64
 import re
+import random
+import string
 from PIL import Image
 import urllib.parse  
 import requests  
 from fpdf import FPDF  
 
 # ==========================================
-# 0. 基本設定與 CSS 美化
+# 0. 基本設定與 CSS 美化 (依據附圖視覺優化)
 # ==========================================
-st.set_page_config(page_title="學習扶助與預警系統", layout="wide", page_icon="📚")
+st.set_page_config(page_title="學習扶助教學輔導登錄系統", layout="wide", page_icon="🏫")
 
 st.markdown("""
     <style>
-    .block-container { padding-top: 2rem !important; padding-bottom: 2rem !important; }
-    .sys-header { display: flex; flex-direction: column; align-items: center; margin-top: 0.5rem; margin-bottom: 0.5rem; }
-    .sys-logo { border-radius: 15px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); margin-bottom: 12px; }
-    .sys-title { font-size: 2.2rem !important; font-weight: 700 !important; color: #2c3e50; margin: 0 !important; padding: 0 !important; }
-    .section-heading { text-align: center; font-size: 1.3rem; font-weight: 600; color: #34495e; margin-top: 1.5rem; margin-bottom: 0.8rem; }
-    .news-card { background-color: #fffdf5; padding: 1.2rem 1.5rem; border-radius: 8px; border-left: 5px solid #ffc107; margin-bottom: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); }
+    /* 全域間距調整 */
+    .block-container { padding-top: 1rem !important; padding-bottom: 2rem !important; max-width: 1100px; }
+    
+    /* 頂部 Hero Banner 橫幅 styling */
+    .hero-banner {
+        background: linear-gradient(135deg, #16325c 0%, #1b3e6f 100%);
+        color: #ffffff;
+        padding: 24px 32px;
+        border-radius: 12px;
+        margin-bottom: 20px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    }
+    .hero-school-header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.2); padding-bottom: 12px; }
+    .hero-school-icon { background-color: #ffffff; border-radius: 8px; width: 42px; height: 42px; display: flex; align-items: center; justify-content: center; font-size: 22px; }
+    .hero-school-text { display: flex; flex-direction: column; }
+    .hero-school-name { font-size: 1.25rem; font-weight: 700; letter-spacing: 1px; color: #ffffff; margin: 0; line-height: 1.2; }
+    .hero-school-en { font-size: 0.75rem; color: #cbd5e1; letter-spacing: 0.5px; margin-top: 2px; }
+    .hero-sys-title { font-size: 1.85rem; font-weight: 700; margin: 0; padding: 0; color: #ffffff; letter-spacing: 0.5px; }
+    .hero-sys-en { font-size: 0.88rem; color: #e2e8f0; margin-top: 4px; }
+
+    /* 最新消息視覺優化 */
+    .news-header-wrap { display: flex; justify-content: space-between; align-items: center; margin-top: 24px; margin-bottom: 12px; }
+    .news-header-title { font-size: 1.25rem; font-weight: 700; color: #1e293b; display: flex; align-items: center; gap: 8px; }
+    .news-header-sub { font-size: 0.85rem; color: #64748b; }
+    .news-item-card { background-color: #f8fafc; border-radius: 10px; padding: 16px 20px; margin-bottom: 12px; border: 1px solid #f1f5f9; }
+    .news-item-tag { display: inline-block; background-color: #dcfce7; color: #15803d; font-size: 0.75rem; font-weight: 600; padding: 3px 10px; border-radius: 12px; margin-right: 8px; }
+    .news-item-date { font-size: 0.82rem; color: #64748b; }
+    .news-item-title { font-size: 1.1rem; font-weight: 700; color: #0f172a; margin-top: 6px; margin-bottom: 4px; }
+    .news-item-body { font-size: 0.92rem; color: #475569; }
+
+    /* 登入卡片 styling */
+    .login-container {
+        background-color: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 16px;
+        padding: 32px 40px;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.05);
+        margin-top: 20px;
+        margin-bottom: 30px;
+    }
+    .login-header { text-align: center; margin-bottom: 24px; }
+    .login-icon { font-size: 32px; color: #1b3e6f; margin-bottom: 6px; }
+    .login-title { font-size: 1.4rem; font-weight: 700; color: #0f172a; margin: 0; }
+    .login-subtitle { font-size: 0.88rem; color: #64748b; margin-top: 4px; }
+    
+    /* 頁尾 */
+    .sys-footer { text-align: center; color: #64748b; font-size: 0.82rem; margin-top: 40px; margin-bottom: 20px; line-height: 1.6; }
+    
+    /* Streamlit 按鈕外觀客製 */
+    div.stButton > button[kind="primary"] {
+        background-color: #1b3e6f !important;
+        color: white !important;
+        font-weight: 700 !important;
+        border-radius: 8px !important;
+        border: none !important;
+        padding: 0.5rem 1rem !important;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -208,12 +261,12 @@ except Exception as e:
 # ==========================================
 try:
     df_settings = conn.read(spreadsheet=SHEET_URL, worksheet="Settings", ttl=600).dropna(how="all")
-    sys_name = df_settings.loc[df_settings['設定項'] == 'SchoolName', '設定值'].values[0] if 'SchoolName' in df_settings['設定項'].values else "🏫 學習扶助系統"
+    sys_name = df_settings.loc[df_settings['設定項'] == 'SchoolName', '設定值'].values[0] if 'SchoolName' in df_settings['設定項'].values else "文昌國小"
     sys_logo = df_settings.loc[df_settings['設定項'] == 'LogoLink', '設定值'].values[0] if 'LogoLink' in df_settings['設定項'].values else ""
     sys_year = df_settings.loc[df_settings['設定項'] == 'SchoolYear', '設定值'].values[0] if 'SchoolYear' in df_settings['設定項'].values else "114上" 
     sys_date = df_settings.loc[df_settings['設定項'] == 'DiagDate', '設定值'].values[0] if 'DiagDate' in df_settings['設定項'].values else pd.Timestamp.today().strftime("%Y/%m/%d")
 except Exception:
-    sys_name = "🏫 學習扶助系統"
+    sys_name = "文昌國小"
     sys_logo = ""
     sys_year = "114上"
     sys_date = pd.Timestamp.today().strftime("%Y/%m/%d")
@@ -230,49 +283,78 @@ if "edit_record_idx" not in st.session_state: st.session_state.edit_record_idx =
 if "edit_record_type" not in st.session_state: st.session_state.edit_record_type = "扶助"
 if "record_form_id" not in st.session_state: st.session_state.record_form_id = 0
 
+# 忘記密碼狀態管理
+if "reset_mode" not in st.session_state: st.session_state.reset_mode = False
+if "reset_code" not in st.session_state: st.session_state.reset_code = ""
+if "reset_account" not in st.session_state: st.session_state.reset_account = ""
+
 # ==========================================
-# 畫面區塊 1：登入介面
+# 畫面區塊 1：登入與忘記密碼介面 (優化首頁視覺)
 # ==========================================
 if not st.session_state.logged_in:
     apply_bg_color("純白") 
-    col_space_left, main_col, col_space_right = st.columns([1, 8, 1])
-    with main_col:
-        clean_sys_name = sys_name.replace("🏫", "").strip() 
-        if sys_logo and sys_logo.startswith("data:image"):
+    
+    # 頂部 Hero Banner (對齊圖片樣式)
+    st.markdown(f"""
+        <div class="hero-banner">
+            <div class="hero-school-header">
+                <div class="hero-school-icon">🏫</div>
+                <div class="hero-school-text">
+                    <div class="hero-school-name">{sys_name}</div>
+                    <div class="hero-school-en">WUN CHANG ELEMENTARY SCHOOL</div>
+                </div>
+            </div>
+            <div class="hero-sys-title">學習扶助教學輔導登錄系統</div>
+            <div class="hero-sys-en">Learning Support & Teaching Guidance System</div>
+        </div>
+    """, unsafe_allow_html=True)
+    
+    # 最新消息區塊 (對齊圖片排版)
+    st.markdown("""
+        <div class="news-header-wrap">
+            <div class="news-header-title">📢 最新消息 / NEWS</div>
+            <div class="news-header-sub">系統公告</div>
+        </div>
+    """, unsafe_allow_html=True)
+    
+    if df_news.empty:
+        st.info("目前尚無公告。")
+    else:
+        for _, n in df_news.sort_values("日期", ascending=False).head(3).iterrows():
             st.markdown(f"""
-                <div class="sys-header">
-                    <img src="{sys_logo}" width="100" class="sys-logo">
-                    <h1 class="sys-title">{clean_sys_name}</h1>
+                <div class="news-item-card">
+                    <div>
+                        <span class="news-item-tag">最新公告</span>
+                        <span class="news-item-date">{n.get('日期', '')}</span>
+                    </div>
+                    <div class="news-item-title">{n.get('標題', '')}</div>
+                    <div class="news-item-body">{n.get('內容', '')}</div>
                 </div>
             """, unsafe_allow_html=True)
-        else:
-            st.markdown(f"<div class='sys-header'><h1 class='sys-title'>{clean_sys_name}</h1></div>", unsafe_allow_html=True)
+            
+    # 使用者登入卡片 (對齊圖片樣式與忘記密碼機制)
+    col_l, col_main, col_r = st.columns([1, 6, 1])
+    with col_main:
+        st.markdown('<div class="login-container">', unsafe_allow_html=True)
         
-        st.markdown("<div class='section-heading'>📢 最新消息</div>", unsafe_allow_html=True)
-        _, col_news_center, _ = st.columns([1, 2, 1]) 
-        with col_news_center:
-            if df_news.empty:
-                st.info("目前尚無公告。")
-            else:
-                for _, n in df_news.sort_values("日期", ascending=False).head(5).iterrows():
-                    st.markdown(f"""
-                        <div class="news-card">
-                            <strong style="font-size: 1.05em; color: #2c3e50;">【{n.get('日期', '')}】 {n.get('標題', '')}</strong><br>
-                            <span style="color: #555; font-size: 0.95em;">{n.get('內容', '')}</span>
-                        </div>
-                    """, unsafe_allow_html=True)
-                
-        st.markdown("<div class='section-heading'>🔐 使用者登入</div>", unsafe_allow_html=True)
-        _, col_login_form, _ = st.columns([1, 1, 1])
-        with col_login_form:
+        # 模式 1：標準登入
+        if not st.session_state.reset_mode:
+            st.markdown("""
+                <div class="login-header">
+                    <div class="login-icon">🔒</div>
+                    <h3 class="login-title">使用者登入</h3>
+                    <div class="login-subtitle">請輸入您的帳號與密碼</div>
+                </div>
+            """, unsafe_allow_html=True)
+            
             do_login = False
             matched_user_name = ""
             matched_user_role = "教師"
             
             with st.form("login_form"):
-                login_account = st.text_input("帳號")
-                login_password = st.text_input("密碼", type="password")
-                submit_login = st.form_submit_button("登入系統", use_container_width=True)
+                login_account = st.text_input("帳號", placeholder="請輸入使用者帳號")
+                login_password = st.text_input("密碼", type="password", placeholder="請輸入密碼")
+                submit_login = st.form_submit_button("登入系統", use_container_width=True, type="primary")
                 
                 if submit_login:
                     try:
@@ -293,6 +375,13 @@ if not st.session_state.logged_in:
                     except Exception as e:
                         st.error(f"連線失敗：{e}")
 
+            # 忘記密碼觸發按鈕
+            c_left, c_center, c_right = st.columns([1, 2, 1])
+            with c_center:
+                if st.button("🔑 忘記密碼？點此寄送驗證碼重置", use_container_width=True):
+                    st.session_state.reset_mode = True
+                    st.rerun()
+
             if do_login:
                 st.session_state.logged_in = True
                 st.session_state.user_name = matched_user_name
@@ -300,6 +389,108 @@ if not st.session_state.logged_in:
                 st.toast(f"歡迎回來，{matched_user_name}！", icon="👋")
                 time.sleep(0.5)
                 st.rerun()
+                
+        # 模式 2：忘記密碼與驗證碼重置
+        else:
+            st.markdown("""
+                <div class="login-header">
+                    <div class="login-icon">🔑</div>
+                    <h3 class="login-title">重置密碼</h3>
+                    <div class="login-subtitle">請輸入您的帳號或 Email 獲取驗證碼</div>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            if not st.session_state.reset_code:
+                # 步驟 1：輸入帳號/Email 寄發驗證碼
+                with st.form("send_code_form"):
+                    input_acc_or_email = st.text_input("帳號或註冊 Email", placeholder="例如: teacher01 或 teacher@school.edu.tw")
+                    btn_send_code = st.form_submit_button("✉️ 寄送驗證碼", use_container_width=True, type="primary")
+                    
+                    if btn_send_code:
+                        if not input_acc_or_email:
+                            st.warning("⚠️ 請輸入帳號或 Email！")
+                        else:
+                            try:
+                                df_users = conn.read(spreadsheet=SHEET_URL, worksheet="Users", ttl=0).dropna(how="all")
+                                u_match = df_users[(df_users['帳號'] == input_acc_or_email) | (df_users['Email'] == input_acc_or_email)]
+                                
+                                if u_match.empty:
+                                    st.error("❌ 找不到匹配的使用者帳號或 Email。")
+                                else:
+                                    user_info = u_match.iloc[0]
+                                    target_email = str(user_info.get('Email', '')).strip()
+                                    
+                                    if not target_email or target_email == 'nan':
+                                        st.error("❌ 此帳號未設定 Email，無法寄送驗證碼，請洽系統管理者。")
+                                    else:
+                                        # 產生 6 位數隨機數字驗證碼
+                                        v_code = ''.join(random.choices(string.digits, k=6))
+                                        st.session_state.reset_code = v_code
+                                        st.session_state.reset_account = user_info['帳號']
+                                        
+                                        # 呼叫 GAS Mail API 寄發信件
+                                        subject = f"[{sys_name}] 密碼重置認證碼"
+                                        body = f"{user_info['姓名']} 老師您好：\n\n您正在進行密碼重置，您的驗證碼為：【 {v_code} 】\n請在頁面輸入此驗證碼以完成密碼變更。\n\n若非本人操作請忽略此信件。"
+                                        
+                                        with st.spinner("正在傳送驗證碼至信箱..."):
+                                            resp = requests.post(GAS_MAIL_URL, json={"email": target_email, "subject": subject, "body": body})
+                                            if resp.status_code == 200 and resp.json().get("status") == "success":
+                                                st.success(f"✅ 驗證碼已成功寄送至 {target_email[:3]}***{target_email[target_email.find('@'):]} ！")
+                                                time.sleep(1)
+                                                st.rerun()
+                                            else:
+                                                st.error(f"❌ 郵件寄送失敗，請稍後再試。")
+                            except Exception as e:
+                                st.error(f"系統錯誤：{e}")
+            else:
+                # 步驟 2：輸入驗證碼與新密碼
+                st.info(f"驗證碼已寄出，請檢查您的電子郵件。")
+                with st.form("verify_code_form"):
+                    user_code = st.text_input("輸入 6 位數驗證碼", max_chars=6)
+                    new_pwd = st.text_input("設定新密碼", type="password")
+                    new_pwd_confirm = st.text_input("再次確認新密碼", type="password")
+                    btn_submit_reset = st.form_submit_button("💾 重置密碼並登入", use_container_width=True, type="primary")
+                    
+                    if btn_submit_reset:
+                        if user_code != st.session_state.reset_code:
+                            st.error("❌ 驗證碼錯誤，請重新確認！")
+                        elif not new_pwd or len(new_pwd) < 4:
+                            st.warning("⚠️ 新密碼至少需要 4 個字元！")
+                        elif new_pwd != new_pwd_confirm:
+                            st.error("❌ 兩次輸入的新密碼不一致！")
+                        else:
+                            try:
+                                df_users = conn.read(spreadsheet=SHEET_URL, worksheet="Users", ttl=0).dropna(how="all")
+                                u_idx = df_users.index[df_users['帳號'] == st.session_state.reset_account].tolist()[0]
+                                df_users.at[u_idx, '密碼'] = new_pwd
+                                conn.update(spreadsheet=SHEET_URL, worksheet="Users", data=df_users)
+                                
+                                st.cache_data.clear()
+                                st.success("🎉 密碼已成功變更！請回登入頁面進行登入。")
+                                st.session_state.reset_mode = False
+                                st.session_state.reset_code = ""
+                                st.session_state.reset_account = ""
+                                time.sleep(2)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ 密碼更新失敗：{e}")
+                                
+            # 返回登入按鈕
+            if st.button("⬅️ 返回登入頁面", use_container_width=True):
+                st.session_state.reset_mode = False
+                st.session_state.reset_code = ""
+                st.session_state.reset_account = ""
+                st.rerun()
+                
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # 頁尾資訊 (對齊圖片設計)
+    st.markdown(f"""
+        <div class="sys-footer">
+            臺中市北屯區文昌國民小學<br>
+            學習扶助教學輔導登錄平台 | 系統管理單位
+        </div>
+    """, unsafe_allow_html=True)
 
 # ==========================================
 # 畫面區塊 2：系統主畫面
@@ -805,7 +996,6 @@ else:
             with tabs[tab_idx_counter]:
                 st.subheader("📊 學生輔導狀況報表")
                 
-                # 依角色篩選可存取的報表模式
                 allowed_modes = []
                 if cur_role in ["管理者", "超級管理者", "扶助承辦人"]:
                     allowed_modes.append("📚 學習扶助系統")
