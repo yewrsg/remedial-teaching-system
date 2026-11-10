@@ -6,6 +6,7 @@ from googleapiclient.http import MediaIoBaseUpload
 from google.oauth2 import service_account
 import io
 import time
+import threading
 import base64
 import re
 import random
@@ -200,25 +201,91 @@ def apply_bg_color(subject):
         </style>
     """, unsafe_allow_html=True)
 
+# Streamlit 1.37+ 支援 fragment（局部重跑）；舊版自動退回為一般函式
+_fragment = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None) or (lambda f: f)
+
+def flash(message, icon=None):
+    """先記下訊息，rerun 之後再顯示（取代 toast + time.sleep 的人為等待）"""
+    st.session_state["_flash"] = (message, icon)
+
+def show_flash():
+    data = st.session_state.pop("_flash", None)
+    if data:
+        st.toast(data[0], icon=data[1])
+
 def get_drive_service():
+    # 每個使用者連線只建立一次 Drive 服務物件（原本每上傳一個檔案就重建一次）
+    cached = st.session_state.get("_drive_service")
+    if cached is not None:
+        return cached
     if "connections" not in st.secrets or "gsheets" not in st.secrets["connections"]:
         st.error("❌ 尚未於 st.secrets 配置 Google Credentials 連線設定。")
         return None
     creds_info = st.secrets["connections"]["gsheets"]
     creds = service_account.Credentials.from_service_account_info(creds_info, scopes=["https://www.googleapis.com/auth/drive"])
-    return build('drive', 'v3', credentials=creds)
+    service = build('drive', 'v3', credentials=creds, cache_discovery=False)
+    st.session_state["_drive_service"] = service
+    return service
+
+def _compress_image_if_needed(file, filename):
+    """大張圖片先縮小再上傳（長邊 1600px、JPEG），可大幅縮短上傳時間；其他檔案維持原樣"""
+    raw = file.getvalue()
+    mime = file.type
+    try:
+        if mime in ("image/jpeg", "image/png") and len(raw) > 400 * 1024:
+            img = Image.open(io.BytesIO(raw))
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            img.thumbnail((1600, 1600))
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=85, optimize=True)
+            small = buf.getvalue()
+            if len(small) < len(raw):
+                base = filename.rsplit(".", 1)[0] if "." in filename else filename
+                return small, "image/jpeg", base + ".jpg"
+    except Exception:
+        pass
+    return raw, mime, filename
 
 def upload_to_drive(file, filename):
     try:
         service = get_drive_service()
         if not service: return None
+        data, mime, filename = _compress_image_if_needed(file, filename)
         file_metadata = {'name': filename, 'parents': [FOLDER_ID]}
-        media = MediaIoBaseUpload(io.BytesIO(file.getvalue()), mimetype=file.type, resumable=True)
+        # 小檔案用一般上傳即可，省掉 resumable 多出來的來回請求
+        media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime, resumable=len(data) > 5 * 1024 * 1024)
         uploaded_file = service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink', supportsAllDrives=True).execute()
         return uploaded_file.get('webViewLink')
     except Exception as e:
+        st.session_state.pop("_drive_service", None)  # 發生錯誤時，下次重新建立連線
         st.error(f"❌ 雲端硬碟上傳失敗：{e}")
         return None
+
+@st.cache_data(ttl=300, show_spinner=False)
+def list_archive_sheet_names(sheet_id):
+    """列出歷史封存分頁名稱（快取 5 分鐘，避免每次互動都重新呼叫 Sheets API）"""
+    creds_info = st.secrets["connections"]["gsheets"]
+    creds = service_account.Credentials.from_service_account_info(
+        creds_info, scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
+    )
+    service = build('sheets', 'v4', credentials=creds, cache_discovery=False)
+    meta = service.spreadsheets().get(spreadsheetId=sheet_id, fields="sheets.properties.title").execute()
+    names = [s['properties']['title'] for s in meta.get('sheets', [])]
+    return [n for n in names if n.startswith('Records_') or n.startswith('Warning_Records_')]
+
+@_fragment
+def render_target_checkboxes(teacher_students, form_id):
+    """勾選輔導對象：放進 fragment，勾選時只重跑這一小塊，不必重跑整支程式"""
+    st.markdown("**✅ 請勾選本次輔導的對象 (可多選)：**")
+    selected = []
+    chk_cols = st.columns(4)
+    for i, ts in enumerate(teacher_students):
+        if chk_cols[i % 4].checkbox(ts, key=f"add_chk_{ts}_{form_id}"):
+            selected.append(ts)
+    if st.session_state.edit_record_idx is None:
+        if selected: apply_bg_color(selected[0].split(" - ")[1])
+        else: apply_bg_color("預設")
 
 def process_image_to_base64(uploaded_file):
     try:
@@ -258,7 +325,8 @@ def auto_create_sheet(sheet_url, new_sheet_name):
                 'requests': [{'addSheet': {'properties': {'title': new_sheet_name}}}]
             }
             service.spreadsheets().batchUpdate(spreadsheetId=sheet_id, body=request_body).execute()
-            time.sleep(2)
+            time.sleep(1.5)
+            list_archive_sheet_names.clear()
         return True
     except Exception as e:
         st.error(f"自動建立資料表 {new_sheet_name} 失敗：{e}")
@@ -273,6 +341,7 @@ class CustomPDF(FPDF):
         except:
             pass
 
+@st.cache_data(show_spinner=False, max_entries=30, ttl=3600)
 def generate_report_pdf(df, title_name, sys_name):
     pdf = CustomPDF()
     try: 
@@ -354,10 +423,45 @@ except Exception as e:
     st.stop()
 
 # ==========================================
+# 資料存取層：伺服器端共用快取 + 寫入鎖
+#  - 讀取：同一張工作表在 ttl 內只向 Google 讀一次，所有使用者共用
+#  - 寫入：只讓「被寫入的那一張表」快取失效（原本是整批清空快取，導致全部資料表重讀）
+# ==========================================
+@st.cache_resource
+def _get_data_store():
+    return {"data": {}, "ver": {}, "lock": threading.Lock()}
+
+def read_sheet(worksheet, ttl=600):
+    store = _get_data_store()
+    now = time.time()
+    if ttl > 0:
+        entry = store["data"].get(worksheet)
+        if entry and now - entry[0] < ttl:
+            return entry[1].copy()
+    ver_before = store["ver"].get(worksheet, 0)
+    df = conn.read(spreadsheet=SHEET_URL, worksheet=worksheet, ttl=0)
+    # 讀取期間若有人剛寫入，就不要把可能過期的資料放進快取
+    if store["ver"].get(worksheet, 0) == ver_before:
+        store["data"][worksheet] = (now, df)
+    return df.copy()
+
+def write_sheet(worksheet, df):
+    store = _get_data_store()
+    with store["lock"]:
+        conn.update(spreadsheet=SHEET_URL, worksheet=worksheet, data=df)
+        store["ver"][worksheet] = store["ver"].get(worksheet, 0) + 1
+        store["data"].pop(worksheet, None)
+
+def refresh_all_data():
+    store = _get_data_store()
+    with store["lock"]:
+        store["data"].clear()
+
+# ==========================================
 # 2. 讀取系統設定與狀態初始化
 # ==========================================
 try:
-    df_settings = conn.read(spreadsheet=SHEET_URL, worksheet="Settings", ttl=600).dropna(how="all")
+    df_settings = read_sheet("Settings", ttl=600).dropna(how="all")
     sys_name = df_settings.loc[df_settings['設定項'] == 'SchoolName', '設定值'].values[0] if 'SchoolName' in df_settings['設定項'].values else "文昌國小"
     sys_logo = df_settings.loc[df_settings['設定項'] == 'LogoLink', '設定值'].values[0] if 'LogoLink' in df_settings['設定項'].values else ""
     sys_year = df_settings.loc[df_settings['設定項'] == 'SchoolYear', '設定值'].values[0] if 'SchoolYear' in df_settings['設定項'].values else "114上" 
@@ -369,7 +473,7 @@ except Exception:
     sys_date = pd.Timestamp.today().strftime("%Y/%m/%d")
 
 try:
-    df_news = conn.read(spreadsheet=SHEET_URL, worksheet="News", ttl=600).dropna(how="all")
+    df_news = read_sheet("News", ttl=600).dropna(how="all")
 except Exception:
     df_news = pd.DataFrame(columns=["日期", "標題", "內容"])
 
@@ -384,6 +488,8 @@ if "record_form_id" not in st.session_state: st.session_state.record_form_id = 0
 if "reset_mode" not in st.session_state: st.session_state.reset_mode = False
 if "reset_code" not in st.session_state: st.session_state.reset_code = ""
 if "reset_account" not in st.session_state: st.session_state.reset_account = ""
+
+show_flash()
 
 # ==========================================
 # 畫面區塊 1：登入與忘記密碼介面 (優化首頁視覺與版面)
@@ -456,7 +562,7 @@ if not st.session_state.logged_in:
                 
                 if submit_login:
                     try:
-                        df_users = conn.read(spreadsheet=SHEET_URL, worksheet="Users", ttl=0).dropna(how="all")
+                        df_users = read_sheet("Users", ttl=120).dropna(how="all")
                         df_users['密碼'] = df_users['密碼'].astype(str)
                         user_match = df_users[(df_users['帳號'] == login_account) & (df_users['密碼'] == str(login_password))]
                         
@@ -484,8 +590,7 @@ if not st.session_state.logged_in:
                 st.session_state.logged_in = True
                 st.session_state.user_name = matched_user_name
                 st.session_state.user_role = matched_user_role
-                st.toast(f"歡迎回來，{matched_user_name}！", icon="👋")
-                time.sleep(0.5)
+                flash(f"歡迎回來，{matched_user_name}！", icon="👋")
                 st.rerun()
                 
         # 模式 2：忘記密碼與驗證碼重置
@@ -509,7 +614,7 @@ if not st.session_state.logged_in:
                             st.warning("⚠️ 請輸入帳號或 Email！")
                         else:
                             try:
-                                df_users = conn.read(spreadsheet=SHEET_URL, worksheet="Users", ttl=0).dropna(how="all")
+                                df_users = read_sheet("Users", ttl=120).dropna(how="all")
                                 u_match = df_users[(df_users['帳號'] == input_acc_or_email) | (df_users['Email'] == input_acc_or_email)]
                                 
                                 if u_match.empty:
@@ -531,8 +636,7 @@ if not st.session_state.logged_in:
                                         with st.spinner("正在傳送驗證碼至信箱..."):
                                             resp = requests.post(GAS_MAIL_URL, json={"email": target_email, "subject": subject, "body": body})
                                             if resp.status_code == 200 and resp.json().get("status") == "success":
-                                                st.success(f"✅ 驗證碼已成功寄送至 {target_email[:3]}***{target_email[target_email.find('@'):]} ！")
-                                                time.sleep(1)
+                                                flash(f"✅ 驗證碼已成功寄送至 {target_email[:3]}***{target_email[target_email.find('@'):]} ！")
                                                 st.rerun()
                                             else:
                                                 st.error(f"❌ 郵件寄送失敗，請稍後再試。")
@@ -556,17 +660,15 @@ if not st.session_state.logged_in:
                             st.error("❌ 兩次輸入的新密碼不一致！")
                         else:
                             try:
-                                df_users = conn.read(spreadsheet=SHEET_URL, worksheet="Users", ttl=0).dropna(how="all")
+                                df_users = read_sheet("Users", ttl=0).dropna(how="all")
                                 u_idx = df_users.index[df_users['帳號'] == st.session_state.reset_account].tolist()[0]
                                 df_users.at[u_idx, '密碼'] = new_pwd
-                                conn.update(spreadsheet=SHEET_URL, worksheet="Users", data=df_users)
+                                write_sheet("Users", df_users)
                                 
-                                st.cache_data.clear()
-                                st.success("🎉 密碼已成功變更！請回登入頁面進行登入。")
+                                flash("🎉 密碼已成功變更！請回登入頁面進行登入。")
                                 st.session_state.reset_mode = False
                                 st.session_state.reset_code = ""
                                 st.session_state.reset_account = ""
-                                time.sleep(2)
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"❌ 密碼更新失敗：{e}")
@@ -583,7 +685,7 @@ if not st.session_state.logged_in:
     # 取得超級管理者的 Email 並在頁尾加上 mailto 連結
     admin_email = ""
     try:
-        df_users_footer = conn.read(spreadsheet=SHEET_URL, worksheet="Users", ttl=600).dropna(how="all")
+        df_users_footer = read_sheet("Users", ttl=600).dropna(how="all")
         admin_match = df_users_footer[df_users_footer['權限'].isin(['超級管理者', '管理者'])]
         if not admin_match.empty and 'Email' in admin_match.columns:
             valid_emails = admin_match['Email'].dropna().tolist()
@@ -615,22 +717,24 @@ else:
         st.write(f"👤 登入者：**{st.session_state.user_name}** | 🛡️ 權限：**{st.session_state.user_role}**")
     with col_btn:
         st.write("") 
+        if st.button("🔄 重新載入資料", use_container_width=True, help="若您剛在 Google 試算表直接修改了資料，可按此立即更新"):
+            refresh_all_data()
+            st.rerun()
         if st.button("🚪 登出系統", use_container_width=True):
-            st.cache_data.clear()
             for key in list(st.session_state.keys()): del st.session_state[key]
             st.rerun() 
 
     st.markdown("---")
 
     try:
-        df_users = conn.read(spreadsheet=SHEET_URL, worksheet="Users", ttl=600).dropna(how="all")
+        df_users = read_sheet("Users", ttl=600).dropna(how="all")
         if '狀態' not in df_users.columns: df_users['狀態'] = '啟用'
             
-        df_students = conn.read(spreadsheet=SHEET_URL, worksheet="Students", ttl=600).dropna(how="all")
-        df_records = conn.read(spreadsheet=SHEET_URL, worksheet="Records", ttl=600).dropna(how="all")
+        df_students = read_sheet("Students", ttl=600).dropna(how="all")
+        df_records = read_sheet("Records", ttl=600).dropna(how="all")
         
         try:
-            df_warn_students = conn.read(spreadsheet=SHEET_URL, worksheet="Warning_Students", ttl=600).dropna(how="all")
+            df_warn_students = read_sheet("Warning_Students", ttl=600).dropna(how="all")
             for col in WARN_STUDENT_COLS:
                 if col not in df_warn_students.columns:
                     df_warn_students[col] = ""
@@ -638,7 +742,7 @@ else:
             df_warn_students = pd.DataFrame(columns=WARN_STUDENT_COLS)
             
         try:
-            df_warn_records = conn.read(spreadsheet=SHEET_URL, worksheet="Warning_Records", ttl=600).dropna(how="all")
+            df_warn_records = read_sheet("Warning_Records", ttl=600).dropna(how="all")
             required_warn_cols = ["學年度", "預警科目", "學生姓名", "輔導內容摘要", "教學輔導策略", "學習狀況", "填報日期", "輔導日期", "指導教師", "佐證資料連結"]
             if list(df_warn_records.columns) != required_warn_cols:
                 df_warn_records = pd.DataFrame(columns=required_warn_cols)
@@ -659,12 +763,14 @@ else:
         if has_sys_settings_access:
             tabs_list.append("⚙️ 系統設定")
         
-        tabs = st.tabs(tabs_list)
+        # 改用單選導覽：只執行目前所選功能的程式碼（st.tabs 每次都會把所有分頁全部執行一遍）
+        active_tab = st.radio("功能選單", tabs_list, horizontal=True, key="main_nav", label_visibility="collapsed")
+        st.markdown("---")
 
         # ==================================================
         # 分頁 1：✍️ 新增輔導紀錄
         # ==================================================
-        with tabs[0]:
+        if active_tab == tabs_list[0]:
             sys_mode = st.radio("🔍 請選擇欲填報的輔導系統：", ["📚 學習扶助系統", "⚠️ 學習預警系統"], horizontal=True)
             st.markdown("---")
             
@@ -680,16 +786,8 @@ else:
                     st.info("您目前沒有被指派負責的扶助學生。")
                     apply_bg_color("預設") 
                 else:
-                    st.markdown("**✅ 請勾選本次輔導的對象 (可多選)：**")
-                    selected_st_subs = []
-                    chk_cols = st.columns(4)
-                    for i, ts in enumerate(teacher_students):
-                        if chk_cols[i % 4].checkbox(ts, key=f"add_chk_{ts}_{st.session_state.record_form_id}"):
-                            selected_st_subs.append(ts)
-                    
-                    if st.session_state.edit_record_idx is None:
-                        if selected_st_subs: apply_bg_color(selected_st_subs[0].split(" - ")[1])
-                        else: apply_bg_color("預設")
+                    render_target_checkboxes(teacher_students, st.session_state.record_form_id)
+                    selected_st_subs = [ts for ts in teacher_students if st.session_state.get(f"add_chk_{ts}_{st.session_state.record_form_id}", False)]
                             
                     with st.form(key="record_form", clear_on_submit=True):
                         c1, c2 = st.columns(2)
@@ -738,11 +836,10 @@ else:
                                     
                                     new_rec_df = pd.DataFrame(new_records_list)
                                     updated_df = pd.concat([df_records, new_rec_df], ignore_index=True)
-                                    conn.update(spreadsheet=SHEET_URL, worksheet="Records", data=updated_df)
+                                    write_sheet("Records", updated_df)
                                     st.session_state.record_form_id += 1 
-                                    st.cache_data.clear()
-                                    st.toast(f'✅ 已成功儲存 {len(new_records_list)} 筆扶助紀錄！', icon='🎉')
-                                    time.sleep(1.5) ; st.rerun()
+                                    flash(f'✅ 已成功儲存 {len(new_records_list)} 筆扶助紀錄！', icon='🎉')
+                                    st.rerun()
                                     
             else:
                 apply_bg_color("預設")
@@ -811,15 +908,14 @@ else:
                                     
                                     new_warn_df = pd.DataFrame(new_warn_records)
                                     updated_warn_df = pd.concat([df_warn_records, new_warn_df], ignore_index=True)
-                                    conn.update(spreadsheet=SHEET_URL, worksheet="Warning_Records", data=updated_warn_df)
-                                    st.cache_data.clear()
-                                    st.toast(f'✅ 已成功批次儲存 {len(new_warn_records)} 筆預警紀錄！', icon='🎉')
-                                    time.sleep(1.5) ; st.rerun()
+                                    write_sheet("Warning_Records", updated_warn_df)
+                                    flash(f'✅ 已成功批次儲存 {len(new_warn_records)} 筆預警紀錄！', icon='🎉')
+                                    st.rerun()
 
         # ==================================================
         # 分頁 2：🗂️ 個人紀錄回顧
         # ==================================================
-        with tabs[1]:
+        if active_tab == tabs_list[1]:
             if st.session_state.edit_record_idx is None:
                 rev_mode = st.radio("🔍 選擇查詢範圍：", ["📚 學習扶助系統", "⚠️ 學習預警系統"], horizontal=True, key="rev_mode")
                 st.markdown("---")
@@ -835,7 +931,9 @@ else:
                     my_records = df_records[df_records['學生姓名'].isin(teacher_students_list)]
                     if my_records.empty: st.info("尚無相關紀錄")
                     else:
-                        for idx, row in my_records.sort_values("輔導日期", ascending=False).iterrows():
+                        _lim = st.session_state.get("_lim_sup", 30)
+                        _recs_sorted = my_records.sort_values("輔導日期", ascending=False)
+                        for idx, row in _recs_sorted.head(_lim).iterrows():
                             with st.expander(f"📅 {row.get('輔導日期', row.get('診斷日期', ''))} | {row['學生姓名']} ({row['授課科目']}) - {row['教學內容摘要']}"):
                                 st.markdown(f"- **教學輔導時間：** {row.get('學年度', '未註記')}\n- **輔導日期：** {row.get('輔導日期', '未註記')}\n- **診斷日期：** {row['診斷日期']}\n- **篩選成績：** {row['篩選測驗成績']}\n- **策略：** {row['教學輔導策略']}\n- **狀況：** {row['學習狀況']}")
                                 p_data = str(row['佐證資料連結'])
@@ -857,16 +955,22 @@ else:
                                 with col_del:
                                     if st.button("🗑️ 刪除", key=f"btn_del_sup_{idx}"):
                                         df_records = df_records.drop(idx)
-                                        conn.update(spreadsheet=SHEET_URL, worksheet="Records", data=df_records)
-                                        st.cache_data.clear() ; st.toast("✅ 紀錄已成功刪除！", icon="🗑️")
-                                        time.sleep(1) ; st.rerun()
+                                        write_sheet("Records", df_records)
+                                        flash("✅ 紀錄已成功刪除！", icon="🗑️")
+                                        st.rerun()
                                         
+                        if len(_recs_sorted) > _lim:
+                            if st.button(f"⬇️ 顯示更多（目前顯示 {_lim} / 共 {len(_recs_sorted)} 筆）", key="more_sup"):
+                                st.session_state["_lim_sup"] = _lim + 30
+                                st.rerun()
                 else:
                     st.subheader("🗂️ 您的學習預警紀錄")
                     my_warn_records = df_warn_records[df_warn_records['指導教師'] == st.session_state.user_name]
                     if my_warn_records.empty: st.info("尚無相關紀錄")
                     else:
-                        for idx, row in my_warn_records.sort_values("輔導日期", ascending=False).iterrows():
+                        _lim = st.session_state.get("_lim_warn", 30)
+                        _recs_sorted = my_warn_records.sort_values("輔導日期", ascending=False)
+                        for idx, row in _recs_sorted.head(_lim).iterrows():
                             with st.expander(f"📅 {row.get('輔導日期', '')} | {row['學生姓名']} ({row['預警科目']}) - {row['輔導內容摘要']}"):
                                 st.markdown(f"- **學年度：** {row.get('學年度', '未註記')}\n- **輔導日期：** {row.get('輔導日期', '未註記')}\n- **策略：** {row['教學輔導策略']}\n- **狀況：** {row['學習狀況']}")
                                 p_data = str(row['佐證資料連結'])
@@ -888,10 +992,14 @@ else:
                                 with col_del:
                                     if st.button("🗑️ 刪除", key=f"btn_del_warn_{idx}"):
                                         df_warn_records = df_warn_records.drop(idx)
-                                        conn.update(spreadsheet=SHEET_URL, worksheet="Warning_Records", data=df_warn_records)
-                                        st.cache_data.clear() ; st.toast("✅ 預警紀錄已刪除！", icon="🗑️")
-                                        time.sleep(1) ; st.rerun()
+                                        write_sheet("Warning_Records", df_warn_records)
+                                        flash("✅ 預警紀錄已刪除！", icon="🗑️")
+                                        st.rerun()
 
+                        if len(_recs_sorted) > _lim:
+                            if st.button(f"⬇️ 顯示更多（目前顯示 {_lim} / 共 {len(_recs_sorted)} 筆）", key="more_warn"):
+                                st.session_state["_lim_warn"] = _lim + 30
+                                st.rerun()
             else:
                 edit_idx = st.session_state.edit_record_idx
                 rec_type = st.session_state.edit_record_type
@@ -957,11 +1065,10 @@ else:
                                     df_records.at[edit_idx, '學習狀況'] = new_status
                                     df_records.at[edit_idx, '輔導日期'] = new_counsel_date.strftime("%Y/%m/%d")
                                     df_records.at[edit_idx, '佐證資料連結'] = " / ".join(final_p_entries)
-                                    conn.update(spreadsheet=SHEET_URL, worksheet="Records", data=df_records)
-                                    st.cache_data.clear()
+                                    write_sheet("Records", df_records)
                                     st.session_state.edit_record_idx = None
-                                    st.toast('✅ 扶助紀錄更新成功！', icon='🎉')
-                                    time.sleep(1.5) ; st.rerun()
+                                    flash('✅ 扶助紀錄更新成功！', icon='🎉')
+                                    st.rerun()
                 elif rec_type == "預警":
                     if edit_idx not in df_warn_records.index:
                         st.session_state.edit_record_idx = None ; st.rerun()
@@ -1019,36 +1126,23 @@ else:
                                     df_warn_records.at[edit_idx, '學習狀況'] = new_status
                                     df_warn_records.at[edit_idx, '輔導日期'] = new_counsel_date.strftime("%Y/%m/%d")
                                     df_warn_records.at[edit_idx, '佐證資料連結'] = " / ".join(final_p_entries)
-                                    conn.update(spreadsheet=SHEET_URL, worksheet="Warning_Records", data=df_warn_records)
-                                    st.cache_data.clear()
+                                    write_sheet("Warning_Records", df_warn_records)
                                     st.session_state.edit_record_idx = None
-                                    st.toast('✅ 預警紀錄更新成功！', icon='🎉')
-                                    time.sleep(1.5) ; st.rerun()
+                                    flash('✅ 預警紀錄更新成功！', icon='🎉')
+                                    st.rerun()
 
         # ==================================================
         # 分頁 3：🕰️ 歷史紀錄查詢
         # ==================================================
-        with tabs[2]:
+        if active_tab == tabs_list[2]:
             st.subheader("🕰️ 歷史紀錄查詢")
             st.write("系統會自動讀取已封存的歷史紀錄，請從下拉式選單選擇要查詢的資料表。")
             
             record_sheets = []
             try:
                 sheet_id_match = re.search(r'/d/([a-zA-Z0-9-_]+)', SHEET_URL)
-                if sheet_id_match:
-                    sheet_id = sheet_id_match.group(1)
-                    if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
-                        creds_info = st.secrets["connections"]["gsheets"]
-                        creds = service_account.Credentials.from_service_account_info(
-                            creds_info, 
-                            scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
-                        )
-                        service = build('sheets', 'v4', credentials=creds)
-                        sheet_metadata = service.spreadsheets().get(spreadsheetId=sheet_id).execute()
-                        sheets = sheet_metadata.get('sheets', '')
-                        
-                        sheet_names = [s['properties']['title'] for s in sheets]
-                        record_sheets = [name for name in sheet_names if name.startswith('Records_') or name.startswith('Warning_Records_')]
+                if sheet_id_match and "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
+                    record_sheets = list_archive_sheet_names(sheet_id_match.group(1))
             except Exception as e:
                 st.warning(f"⚠️ 無法自動抓取歷史資料表清單。錯誤：{e}")
                 
@@ -1062,7 +1156,7 @@ else:
                 if submit_search:
                     with st.spinner(f"正在搜尋 {selected_archive} ..."):
                         try:
-                            df_history = conn.read(spreadsheet=SHEET_URL, worksheet=selected_archive, ttl=0).dropna(how="all")
+                            df_history = read_sheet(selected_archive, ttl=300).dropna(how="all")
                             if df_history.empty:
                                 st.info(f"📭 `{selected_archive}` 資料表存在，但目前沒有任何紀錄。")
                             else:
@@ -1074,7 +1168,7 @@ else:
         # ==================================================
         # 分頁 4：⚙️ 個人帳號設定
         # ==================================================
-        with tabs[3]:
+        if active_tab == tabs_list[3]:
             st.subheader("⚙️ 個人帳號設定")
             with st.form("change_pwd_form"):
                 old_pwd = st.text_input("目前的密碼", type="password")
@@ -1089,11 +1183,9 @@ else:
                     else:
                         idx = df_users.index[df_users['姓名'] == st.session_state.user_name].tolist()[0]
                         df_users.at[idx, '密碼'] = new_pwd
-                        conn.update(spreadsheet=SHEET_URL, worksheet="Users", data=df_users)
-                        st.cache_data.clear()
-                        st.success("✅ 密碼修改成功！請重新登入。")
-                        time.sleep(2)
+                        write_sheet("Users", df_users)
                         for key in list(st.session_state.keys()): del st.session_state[key]
+                        flash("✅ 密碼修改成功！請重新登入。")
                         st.rerun()
 
         # ==================================================
@@ -1103,7 +1195,7 @@ else:
         
         # --- 📊 學生報表分頁 ---
         if has_report_access:
-            with tabs[tab_idx_counter]:
+            if active_tab == tabs_list[tab_idx_counter]:
                 st.subheader("📊 學生輔導狀況報表")
                 
                 allowed_modes = []
@@ -1119,13 +1211,14 @@ else:
                     
                     if report_mode == "📚 學習扶助系統":
                         report_data = []
+                        _cnt_sup = df_records.groupby(['學生姓名', '授課科目']).size().to_dict()
                         for _, stu in df_students.iterrows():
                             s_name = stu['學生姓名']
                             s_class = str(stu.get('班別', '?'))
                             for sub in ['國語', '英語', '數學']:
                                 teacher = str(stu.get(f'{sub}_教學者', '')).strip()
                                 if teacher and teacher != "nan":
-                                    count = len(df_records[(df_records['學生姓名'] == s_name) & (df_records['授課科目'] == sub)])
+                                    count = _cnt_sup.get((s_name, sub), 0)
                                     report_data.append({
                                         "班別": s_class, "學生姓名": s_name, "科目": sub,
                                         "指導教師": teacher, "紀錄筆數": count,
@@ -1166,6 +1259,7 @@ else:
                                     
                     elif report_mode == "⚠️ 學習預警系統":
                         report_data = []
+                        _cnt_warn = df_warn_records.groupby(['學生姓名', '預警科目', '指導教師']).size().to_dict()
                         for _, stu in df_warn_students.iterrows():
                             s_name = stu['學生姓名']
                             s_class = str(stu.get('班別', '?'))
@@ -1173,7 +1267,7 @@ else:
                                 teacher_col = f"{sub}教學者"
                                 teacher = str(stu.get(teacher_col, '')).strip()
                                 if teacher and teacher != "nan":
-                                    count = len(df_warn_records[(df_warn_records['學生姓名'] == s_name) & (df_warn_records['預警科目'] == sub) & (df_warn_records['指導教師'] == teacher)])
+                                    count = _cnt_warn.get((s_name, sub, teacher), 0)
                                     report_data.append({
                                         "班別": s_class, "學生姓名": s_name, "預警科目": sub,
                                         "指導教師": teacher, "紀錄筆數": count,
@@ -1217,7 +1311,7 @@ else:
 
         # --- 👨‍🏫 教師報表分頁 ---
         if has_report_access:
-            with tabs[tab_idx_counter]:
+            if active_tab == tabs_list[tab_idx_counter]:
                 st.subheader("👨‍🏫 教師填寫進度報表")
                 
                 allowed_modes_tch = []
@@ -1233,13 +1327,14 @@ else:
                     
                     if report_mode_tch == "📚 學習扶助系統":
                         report_data = []
+                        _cnt_sup = df_records.groupby(['學生姓名', '授課科目']).size().to_dict()
                         for _, stu in df_students.iterrows():
                             s_name = stu['學生姓名']
                             s_class = str(stu.get('班別', '?'))
                             for sub in ['國語', '英語', '數學']:
                                 teacher = str(stu.get(f'{sub}_教學者', '')).strip()
                                 if teacher and teacher != "nan":
-                                    count = len(df_records[(df_records['學生姓名'] == s_name) & (df_records['授課科目'] == sub)])
+                                    count = _cnt_sup.get((s_name, sub), 0)
                                     report_data.append({
                                         "班別": s_class, "學生姓名": s_name, "科目": sub,
                                         "指導教師": teacher, "紀錄筆數": count,
@@ -1301,6 +1396,7 @@ else:
                                         
                     elif report_mode_tch == "⚠️ 學習預警系統":
                         report_data = []
+                        _cnt_warn = df_warn_records.groupby(['學生姓名', '預警科目', '指導教師']).size().to_dict()
                         for _, stu in df_warn_students.iterrows():
                             s_name = stu['學生姓名']
                             s_class = str(stu.get('班別', '?'))
@@ -1308,7 +1404,7 @@ else:
                                 teacher_col = f"{sub}教學者"
                                 teacher = str(stu.get(teacher_col, '')).strip()
                                 if teacher and teacher != "nan":
-                                    count = len(df_warn_records[(df_warn_records['學生姓名'] == s_name) & (df_warn_records['預警科目'] == sub) & (df_warn_records['指導教師'] == teacher)])
+                                    count = _cnt_warn.get((s_name, sub, teacher), 0)
                                     report_data.append({
                                         "班別": s_class, "學生姓名": s_name, "科目": sub,
                                         "指導教師": teacher, "紀錄筆數": count,
@@ -1373,7 +1469,7 @@ else:
 
         # --- ⚙️ 系統設定分頁 ---
         if has_sys_settings_access:
-            with tabs[tab_idx_counter]:
+            if active_tab == tabs_list[tab_idx_counter]:
                 st.subheader("⚙️ 系統基本設定")
                 with st.form("settings_form"):
                     new_sys_name = st.text_input("學校名稱 / 系統標題", value=sys_name)
@@ -1390,8 +1486,8 @@ else:
                             {"設定項": "SchoolYear", "設定值": sys_year}, 
                             {"設定項": "DiagDate", "設定值": new_sys_date.strftime("%Y/%m/%d")}
                         ])
-                        conn.update(spreadsheet=SHEET_URL, worksheet="Settings", data=new_settings_df)
-                        st.cache_data.clear() ; st.toast('已儲存！') ; time.sleep(1) ; st.rerun()
+                        write_sheet("Settings", new_settings_df)
+                        flash('已儲存！') ; st.rerun()
                 
                 # ==================================================
                 # --- 學期轉換與備份管理 ---
@@ -1420,12 +1516,12 @@ else:
                             if auto_create_sheet(SHEET_URL, archive_name):
                                 try:
                                     try:
-                                        df_archive = conn.read(spreadsheet=SHEET_URL, worksheet=archive_name, ttl=0).dropna(how="all")
+                                        df_archive = read_sheet(archive_name, ttl=0).dropna(how="all")
                                         df_archive_new = pd.concat([df_archive, df_data], ignore_index=True).drop_duplicates()
                                     except:
                                         df_archive_new = df_data
                                         
-                                    conn.update(spreadsheet=SHEET_URL, worksheet=archive_name, data=df_archive_new)
+                                    write_sheet(archive_name, df_archive_new)
                                 except Exception as e:
                                     st.error(f"❌ {archive_name} 備份失敗：{e}")
                                     all_success = False
@@ -1434,14 +1530,12 @@ else:
                         
                         if all_success:
                             empty_records_df = pd.DataFrame(columns=df_records.columns)
-                            conn.update(spreadsheet=SHEET_URL, worksheet="Records", data=empty_records_df)
+                            write_sheet("Records", empty_records_df)
                             
                             empty_warn_records_df = pd.DataFrame(columns=df_warn_records.columns)
-                            conn.update(spreadsheet=SHEET_URL, worksheet="Warning_Records", data=empty_warn_records_df)
+                            write_sheet("Warning_Records", empty_warn_records_df)
                             
-                            st.cache_data.clear()
-                            st.success(f"✅ 資料已成功備份至 `{dynamic_sys_year}` 歷史資料表，且本學期所有輔導紀錄已清空！")
-                            time.sleep(2)
+                            flash(f"✅ 資料已成功備份至 `{dynamic_sys_year}` 歷史資料表，且本學期所有輔導紀錄已清空！")
                             st.rerun()
 
                 st.write("**2. 下載名單範例檔**")
@@ -1463,22 +1557,22 @@ else:
                     if uploaded_users and st.button("💾 更新使用者"):
                         with st.spinner("更新中..."):
                             new_users_df = pd.read_csv(uploaded_users)
-                            conn.update(spreadsheet=SHEET_URL, worksheet="Users", data=new_users_df)
-                            st.cache_data.clear() ; st.success("✅ 完成！") ; time.sleep(1); st.rerun()
+                            write_sheet("Users", new_users_df)
+                            flash("✅ 完成！") ; st.rerun()
                 with col_up2:
                     uploaded_students = st.file_uploader("上傳【扶助學生】", type=["csv"])
                     if uploaded_students and st.button("💾 更新扶助學生"):
                         with st.spinner("更新中..."):
                             new_stu_df = pd.read_csv(uploaded_students)
-                            conn.update(spreadsheet=SHEET_URL, worksheet="Students", data=new_stu_df)
-                            st.cache_data.clear() ; st.success("✅ 完成！") ; time.sleep(1); st.rerun()
+                            write_sheet("Students", new_stu_df)
+                            flash("✅ 完成！") ; st.rerun()
                 with col_up3:
                     uploaded_warn_students = st.file_uploader("上傳【預警學生】", type=["csv"])
                     if uploaded_warn_students and st.button("💾 更新預警學生"):
                         with st.spinner("更新中..."):
                             new_w_stu_df = pd.read_csv(uploaded_warn_students)
-                            conn.update(spreadsheet=SHEET_URL, worksheet="Warning_Students", data=new_w_stu_df)
-                            st.cache_data.clear() ; st.success("✅ 完成！") ; time.sleep(1); st.rerun()
+                            write_sheet("Warning_Students", new_w_stu_df)
+                            flash("✅ 完成！") ; st.rerun()
 
                 # ==================================================
                 st.markdown("---")
@@ -1506,8 +1600,8 @@ else:
                                 "權限": n_role, "Email": n_email, "狀態": "啟用"
                             }])
                             updated_users_df = pd.concat([df_users, new_user], ignore_index=True)
-                            conn.update(spreadsheet=SHEET_URL, worksheet="Users", data=updated_users_df)
-                            st.cache_data.clear() ; st.toast("✅ 使用者新增成功！") ; time.sleep(1) ; st.rerun()
+                            write_sheet("Users", updated_users_df)
+                            flash("✅ 使用者新增成功！") ; st.rerun()
 
                 st.write("✏️ **編輯或停用使用者**")
                 
@@ -1559,10 +1653,8 @@ else:
                                     df_users.at[selected_idx, 'Email'] = e_email
                                     df_users.at[selected_idx, '狀態'] = e_status
                                     
-                                    conn.update(spreadsheet=SHEET_URL, worksheet="Users", data=df_users)
-                                    st.cache_data.clear()
-                                    st.success(f"✅ 【{e_name}】的資料更新成功！")
-                                    time.sleep(1.5)
+                                    write_sheet("Users", df_users)
+                                    flash(f"✅ 【{e_name}】的資料更新成功！")
                                     st.rerun()
 
                 st.markdown("---")
@@ -1577,16 +1669,16 @@ else:
                         else:
                             new_news = pd.DataFrame([{"日期": n_date.strftime("%Y/%m/%d"), "標題": n_title, "內容": n_content}])
                             updated_news_df = pd.concat([df_news, new_news], ignore_index=True)
-                            conn.update(spreadsheet=SHEET_URL, worksheet="News", data=updated_news_df)
-                            st.cache_data.clear() ; st.rerun()
+                            write_sheet("News", updated_news_df)
+                            st.rerun()
                 if not df_news.empty:
                     for i, row in df_news.sort_values("日期", ascending=False).iterrows():
                         with st.expander(f"【{row.get('日期','')}】 {row.get('標題','')}"):
                             st.write(f"{row.get('內容','')}")
                             if st.button("🗑️ 刪除", key=f"del_news_{i}"):
                                 updated_news_df = df_news.drop(i)
-                                conn.update(spreadsheet=SHEET_URL, worksheet="News", data=updated_news_df)
-                                st.cache_data.clear() ; st.rerun()
+                                write_sheet("News", updated_news_df)
+                                st.rerun()
 
     except Exception as e:
         st.error(f"系統錯誤：{e}")
