@@ -34,16 +34,16 @@ st.markdown("""
         display: flex;
         align-items: center;
         justify-content: center;
-        gap: 20px;
+        gap: 28px;
         margin: 0 0 18px 0;
         padding: 8px 0 16px 0;
         border-bottom: 2px solid #c6a15b;
     }
     .login-school-logo {
         display: block;
-        width: 88px;
-        height: 88px;
-        flex: 0 0 88px;
+        width: 158px;
+        height: 158px;
+        flex: 0 0 158px;
         object-fit: contain;
     }
     .login-brand {
@@ -53,16 +53,16 @@ st.markdown("""
     }
     .login-school-name {
         color: #16325c;
-        font-size: 1.85rem;
+        font-size: 3.33rem;
         font-weight: 750;
-        letter-spacing: 1px;
+        letter-spacing: 1.8px;
         line-height: 1.35;
         margin: 0 0 3px 0;
     }
     .login-school-en {
         color: #64748b;
-        font-size: 0.72rem;
-        letter-spacing: 1.1px;
+        font-size: 1.3rem;
+        letter-spacing: 2px;
         margin: 0;
     }
     .login-news-panel { margin-top: 10px; }
@@ -138,9 +138,10 @@ st.markdown("""
             width: 100% !important;
             flex: 1 1 100% !important;
         }
-        .login-brand-row { gap: 12px; }
-        .login-school-logo { width: 64px; height: 64px; flex-basis: 64px; }
-        .login-school-name { font-size: 1.45rem; }
+        .login-brand-row { flex-direction: column; gap: 8px; }
+        .login-school-logo { width: 115px; height: 115px; flex-basis: 115px; }
+        .login-school-name { font-size: 2.1rem; letter-spacing: 1px; }
+        .login-school-en { font-size: 0.85rem; letter-spacing: 1.2px; }
         .login-news-list { max-height: 420px; }
     }
     
