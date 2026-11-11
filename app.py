@@ -8,6 +8,7 @@ import io
 import time
 import threading
 import hashlib
+import uuid
 import html as _html
 import base64
 import re
@@ -170,6 +171,12 @@ GAS_MAIL_URL = "https://script.google.com/macros/s/AKfycbxIQXJ-QENFEZn6IgyQLdESm
 WARN_SUBJECTS = ["國語", "本土語", "英語", "數學", "社會", "自然", "健體", "藝文", "綜合"]
 WARN_STUDENT_COLS = ["班別", "學生姓名"] + [col for sub in WARN_SUBJECTS for col in (sub, f"{sub}教學者")]
 
+# 學習扶助與學習預警「共用」的填寫選項（兩系統一致，同步登錄時才能直接共用同一份內容）
+COMMON_STRATEGIES = ["演示教學", "學習單、試題習寫", "實物操作", "數位學習平台"]
+COMMON_STATUS = ["精熟", "未精熟，已解說", "未精熟，改日再測"]
+SUP_SUBJECTS = ['國語', '英語', '數學']
+LINK_COL = "同步編號"   # 同步登錄的兩筆紀錄共用同一個編號，用來在修改/刪除時找到另一筆
+
 # ==========================================
 # 1. 核心工具函數
 # ==========================================
@@ -293,6 +300,66 @@ def apply_roster_updates(fresh_df, changes, selected_keys):
         n_students += 1
     return df, n_students
 
+def new_link_id():
+    return uuid.uuid4().hex[:10]
+
+def get_dual_triples(df_sup_students, df_warn_students_, user):
+    """同時是扶助與預警對象的集合 {(班別, 姓名, 科目)}：同學生＋同科目＋同一位教學者（目前登入者）"""
+    sup = set()
+    for _, r in df_sup_students.iterrows():
+        for sub in SUP_SUBJECTS:
+            if str(r.get(f'{sub}_教學者', '')).strip() == user:
+                sup.add((_norm_cell(r.get('班別', '')), _norm_cell(r.get('學生姓名', '')), sub))
+    warn = set()
+    for sub in SUP_SUBJECTS:  # 只有扶助的三個科目才可能重疊
+        col = f"{sub}教學者"
+        if col in df_warn_students_.columns:
+            sub_df = df_warn_students_[df_warn_students_[col].astype(str).str.strip() == user]
+            for _, r in sub_df.iterrows():
+                warn.add((_norm_cell(r.get('班別', '')), _norm_cell(r.get('學生姓名', '')), sub))
+    return sup & warn
+
+def find_linked_idx(df_other, link_id):
+    """在另一個系統的資料表中，找出與此編號對應的紀錄（回傳 index 清單）"""
+    lid = _norm_cell(link_id)
+    if lid == "" or LINK_COL not in df_other.columns:
+        return []
+    return df_other.index[df_other[LINK_COL].map(_norm_cell) == lid].tolist()
+
+def link_id_set(df):
+    if LINK_COL not in df.columns:
+        return set()
+    return {_norm_cell(v) for v in df[LINK_COL]} - {""}
+
+def rec_signature(row):
+    """用來確認「要刪除的是不是同一筆」：學生、日期、科目"""
+    return (_norm_cell(row.get('學生姓名', '')), _norm_cell(row.get('輔導日期', '')),
+            _norm_cell(row.get('授課科目', row.get('預警科目', ''))))
+
+def render_dual_retry_box():
+    """同步登錄時，第一個系統已寫入、第二個系統寫入失敗 → 顯示明確錯誤並提供重試"""
+    info = st.session_state.get("dual_retry")
+    if not info:
+        return
+    st.error(f"⚠️ **同步登錄未完成**：【{info['done_label']}】紀錄已成功儲存，但【{info['label']}】的 {len(info['rows'])} 筆同步紀錄**寫入失敗**。\n\n失敗原因：{info['error']}")
+    c1, c2, _sp = st.columns([2, 2, 6])
+    retry_ok = False
+    if c1.button("🔁 重試寫入", key="dual_retry_btn"):
+        try:
+            fresh = read_sheet(info["sheet"], ttl=0).dropna(how="all")
+            write_sheet(info["sheet"], pd.concat([fresh, pd.DataFrame(info["rows"])], ignore_index=True))
+            retry_ok = True
+        except Exception as e:
+            info["error"] = str(e)
+            st.error(f"❌ 重試仍然失敗：{e}")
+    if retry_ok:
+        st.session_state.pop("dual_retry", None)
+        flash(f"✅ 已補寫入【{info['label']}】{len(info['rows'])} 筆紀錄！", icon="🎉")
+        st.rerun()
+    if c2.button("放棄補寫", key="dual_retry_drop_btn"):
+        st.session_state.pop("dual_retry", None)
+        st.rerun()
+
 def safe_html_text(value):
     """公告文字轉成可安全嵌入 HTML 的單行字串：
     跳脫特殊字元，並把換行改成 <br>，避免空白行或縮排讓 Markdown 把 HTML 當成程式碼區塊"""
@@ -314,6 +381,12 @@ def show_flash():
     data = st.session_state.pop("_flash", None)
     if data:
         st.toast(data[0], icon=data[1])
+    err = st.session_state.get("_sticky_error")
+    if err:  # 需要使用者確實看到的錯誤（不會自動消失）
+        st.error(err)
+        if st.button("✖ 我知道了", key="_sticky_error_close"):
+            st.session_state.pop("_sticky_error", None)
+            st.rerun()
 
 def get_drive_service():
     # 每個使用者連線只建立一次 Drive 服務物件（原本每上傳一個檔案就重建一次）
@@ -377,13 +450,13 @@ def list_archive_sheet_names(sheet_id):
     return [n for n in names if n.startswith('Records_') or n.startswith('Warning_Records_')]
 
 @_fragment
-def render_target_checkboxes(teacher_students, form_id):
+def render_target_checkboxes(teacher_students, form_id, dual_set=frozenset()):
     """勾選輔導對象：放進 fragment，勾選時只重跑這一小塊，不必重跑整支程式"""
     st.markdown("**✅ 請勾選本次輔導的對象 (可多選)：**")
     selected = []
     chk_cols = st.columns(4)
     for i, ts in enumerate(teacher_students):
-        if chk_cols[i % 4].checkbox(ts, key=f"add_chk_{ts}_{form_id}"):
+        if chk_cols[i % 4].checkbox(f"{ts} 🔗" if ts in dual_set else ts, key=f"add_chk_{ts}_{form_id}"):
             selected.append(ts)
     if st.session_state.edit_record_idx is None:
         if selected: apply_bg_color(selected[0].split(" - ")[1])
@@ -585,6 +658,7 @@ if "user_role" not in st.session_state: st.session_state.user_role = "教師"
 if "edit_record_idx" not in st.session_state: st.session_state.edit_record_idx = None
 if "edit_record_type" not in st.session_state: st.session_state.edit_record_type = "扶助"
 if "record_form_id" not in st.session_state: st.session_state.record_form_id = 0
+if "warn_form_id" not in st.session_state: st.session_state.warn_form_id = 0
 
 # 忘記密碼狀態管理
 if "reset_mode" not in st.session_state: st.session_state.reset_mode = False
@@ -873,25 +947,33 @@ else:
         # 分頁 1：✍️ 新增輔導紀錄
         # ==================================================
         if active_tab == tabs_list[0]:
+            render_dual_retry_box()
+            dual_triples = get_dual_triples(df_students, df_warn_students, st.session_state.user_name)
             sys_mode = st.radio("🔍 請選擇欲填報的輔導系統：", ["📚 學習扶助系統", "⚠️ 學習預警系統"], horizontal=True)
             st.markdown("---")
             
             if sys_mode == "📚 學習扶助系統":
                 st.subheader("📚 新增學習扶助紀錄")
                 teacher_students = []
+                sup_dual = set()
                 for _, row in df_students.iterrows():
-                    for sub in ['國語', '英語', '數學']:
+                    for sub in SUP_SUBJECTS:
                         if str(row.get(f'{sub}_教學者', '')).strip() == st.session_state.user_name:
-                            teacher_students.append(f"{row['學生姓名']} - {sub}")
+                            ts = f"{row['學生姓名']} - {sub}"
+                            teacher_students.append(ts)
+                            if (_norm_cell(row.get('班別', '')), _norm_cell(row['學生姓名']), sub) in dual_triples:
+                                sup_dual.add(ts)
                 
                 if not teacher_students:
                     st.info("您目前沒有被指派負責的扶助學生。")
                     apply_bg_color("預設") 
                 else:
-                    render_target_checkboxes(teacher_students, st.session_state.record_form_id)
+                    render_target_checkboxes(teacher_students, st.session_state.record_form_id, frozenset(sup_dual))
                     selected_st_subs = [ts for ts in teacher_students if st.session_state.get(f"add_chk_{ts}_{st.session_state.record_form_id}", False)]
+                    if sup_dual:
+                        st.caption("🔗 標示 🔗 的學生同時也是【學習預警】對象（同學生、同科目、同一位教學者），可在下方選擇是否同步登錄到預警系統，免重複填寫。")
                             
-                    with st.form(key="record_form", clear_on_submit=True):
+                    with st.form(key=f"record_form_{st.session_state.record_form_id}", clear_on_submit=False):
                         c1, c2 = st.columns(2)
                         with c1:
                             counsel_term = get_auto_school_year()
@@ -900,10 +982,16 @@ else:
                             counsel_date = st.date_input("🗓️ 實際輔導日期", value=pd.Timestamp.today().date())
                         with c2:
                             summary = st.text_input("教學摘要 (代碼)")
-                            strategy = st.multiselect("輔導策略", ["演示教學", "學習單、試題習寫", "實物操作", "數位學習平台"])
-                            status = st.radio("學習狀況", ["精熟", "未精熟，已解說", "未精熟，改日再測"])
+                            strategy = st.multiselect("輔導策略", COMMON_STRATEGIES)
+                            status = st.radio("學習狀況", COMMON_STATUS)
                         p_link = st.text_input("佐證網址 (選填)")
                         u_files = st.file_uploader("上傳佐證檔案 (最多三個)", type=["png", "jpg", "jpeg", "pdf", "docx"], accept_multiple_files=True)
+                        
+                        do_sync = False
+                        if sup_dual:
+                            sync_choice = st.radio("🔗 同步登錄（僅適用於標示 🔗 的學生）",
+                                                   ["只登錄在學習扶助", "同時登錄到學習預警（共用同一份內容與佐證）"], horizontal=True)
+                            do_sync = sync_choice.startswith("同時")
                         
                         if st.form_submit_button("💾 儲存紀錄"):
                             if not selected_st_subs: st.warning("⚠️ 請至少勾選一位輔導對象！")
@@ -919,6 +1007,7 @@ else:
                                             if drive_link: p_entries.append(f"檔案: {drive_link}")
                                     
                                     new_records_list = []
+                                    new_warn_rows = []
                                     for st_sub in selected_st_subs:
                                         sel_stu, sel_sub = st_sub.split(" - ")
                                         stu_score = 0
@@ -929,19 +1018,46 @@ else:
                                                 val = stu_data.iloc[0].get(score_col_name, 0)
                                                 if pd.notna(val): stu_score = val
                                                 
-                                        new_records_list.append({
+                                        rec = {
                                             "學年度": counsel_term, "授課科目": sel_sub, "學生姓名": sel_stu,
                                             "篩選測驗成績": stu_score, "教學內容摘要": summary, "教學輔導策略": ", ".join(strategy),
                                             "學習狀況": status, "診斷日期": sys_date, "輔導日期": counsel_date.strftime("%Y/%m/%d"),
                                             "佐證資料連結": " / ".join(p_entries)
-                                        })
+                                        }
+                                        if do_sync and st_sub in sup_dual:
+                                            lid = new_link_id()
+                                            rec[LINK_COL] = lid
+                                            new_warn_rows.append({
+                                                "學年度": counsel_term, "預警科目": sel_sub, "學生姓名": sel_stu,
+                                                "輔導內容摘要": summary, "教學輔導策略": ", ".join(strategy),
+                                                "學習狀況": status, "填報日期": sys_date, "輔導日期": counsel_date.strftime("%Y/%m/%d"),
+                                                "指導教師": st.session_state.user_name,
+                                                "佐證資料連結": " / ".join(p_entries), LINK_COL: lid
+                                            })
+                                        new_records_list.append(rec)
                                     
-                                    new_rec_df = pd.DataFrame(new_records_list)
-                                    updated_df = pd.concat([df_records, new_rec_df], ignore_index=True)
-                                    write_sheet("Records", updated_df)
-                                    st.session_state.record_form_id += 1 
-                                    flash(f'✅ 已成功儲存 {len(new_records_list)} 筆扶助紀錄！', icon='🎉')
-                                    st.rerun()
+                                    primary_ok = True
+                                    try:
+                                        write_sheet("Records", pd.concat([df_records, pd.DataFrame(new_records_list)], ignore_index=True))
+                                    except Exception as e:
+                                        primary_ok = False
+                                        st.error(f"❌ 【學習扶助】紀錄儲存失敗，本次資料**均未寫入**（包含預警同步紀錄）。請稍後再按一次「儲存紀錄」。\n\n錯誤訊息：{e}")
+                                    
+                                    if primary_ok:
+                                        sync_failed = False
+                                        if new_warn_rows:
+                                            try:
+                                                write_sheet("Warning_Records", pd.concat([df_warn_records, pd.DataFrame(new_warn_rows)], ignore_index=True))
+                                            except Exception as e:
+                                                sync_failed = True
+                                                st.session_state.dual_retry = {"sheet": "Warning_Records", "label": "學習預警", "done_label": "學習扶助",
+                                                                               "rows": new_warn_rows, "error": str(e)}
+                                        st.session_state.record_form_id += 1 
+                                        if not sync_failed:
+                                            msg = f'✅ 已成功儲存 {len(new_records_list)} 筆扶助紀錄！'
+                                            if new_warn_rows: msg = f'✅ 已成功儲存 {len(new_records_list)} 筆扶助紀錄，並同步登錄 {len(new_warn_rows)} 筆預警紀錄！'
+                                            flash(msg, icon='🎉')
+                                        st.rerun()
                                     
             else:
                 apply_bg_color("預設")
@@ -961,9 +1077,18 @@ else:
                     
                     teacher_col = f"{selected_warn_subject}教學者"
                     df_target_students = df_warn_students[df_warn_students[teacher_col].astype(str).str.strip() == st.session_state.user_name]
-                    student_options = df_target_students.apply(lambda row: f"{row['學生姓名']} ({row['班別']})", axis=1).tolist()
+                    warn_opt_map = {}
+                    for _, r in df_target_students.iterrows():
+                        cls_n, stu_n = _norm_cell(r['班別']), _norm_cell(r['學生姓名'])
+                        is_dual = (cls_n, stu_n, selected_warn_subject) in dual_triples
+                        label = f"{r['學生姓名']} ({r['班別']})" + (" 🔗" if is_dual else "")
+                        warn_opt_map[label] = (cls_n, stu_n, is_dual)
+                    student_options = list(warn_opt_map.keys())
+                    any_dual = any(v[2] for v in warn_opt_map.values())
+                    if any_dual:
+                        st.caption("🔗 標示 🔗 的學生同時也是【學習扶助】對象（同學生、同科目、同一位教學者），可在表單中選擇是否同步登錄到扶助系統，免重複填寫。")
                     
-                    with st.form("warning_record_form", clear_on_submit=True):
+                    with st.form(f"warning_record_form_{st.session_state.warn_form_id}", clear_on_submit=False):
                         st.markdown(f"**📌 步驟二：請選擇參與輔導的【{selected_warn_subject}】預警學生 (可多選)：**")
                         selected_warn_students = st.multiselect("勾選學生", student_options)
                         
@@ -974,15 +1099,23 @@ else:
                             counsel_date = st.date_input("🗓️ 實際輔導日期", value=pd.Timestamp.today().date())
                         with c2:
                             summary = st.text_input("輔導內容摘要 / 觀察紀錄")
-                            strategy = st.multiselect("輔導策略", ["個別指導", "小組合作", "學習單練習", "線上資源輔助", "親師聯繫", "其他"])
-                            status = st.radio("學習狀況", ["有進步", "持平", "需持續觀察", "退步"])
+                            strategy = st.multiselect("輔導策略", COMMON_STRATEGIES)
+                            status = st.radio("學習狀況", COMMON_STATUS)
                         
                         p_link = st.text_input("佐證網址 (選填)")
                         u_files = st.file_uploader("上傳佐證檔案 (最多三個)", type=["png", "jpg", "jpeg", "pdf", "docx"], accept_multiple_files=True)
                         
+                        do_sync = False
+                        if any_dual:
+                            sync_choice = st.radio("🔗 同步登錄（僅適用於標示 🔗 的學生）",
+                                                   ["只登錄在學習預警", "同時登錄到學習扶助（共用同一份內容與佐證）"], horizontal=True)
+                            do_sync = sync_choice.startswith("同時")
+                        
                         if st.form_submit_button("💾 批次儲存預警紀錄"):
+                            sync_targets = [s for s in selected_warn_students if warn_opt_map[s][2]] if do_sync else []
                             if not selected_warn_students: st.warning("⚠️ 請至少選擇一位學生！")
                             elif not summary: st.warning("⚠️ 輔導內容摘要為必填！")
+                            elif sync_targets and not p_link and not u_files: st.warning("⚠️ 同步登錄到學習扶助時，必須填寫「佐證網址」或上傳「佐證檔案」！")
                             else:
                                 with st.spinner('上傳資料中...'):
                                     p_entries = []
@@ -993,9 +1126,10 @@ else:
                                             if drive_link: p_entries.append(f"檔案: {drive_link}")
                                     
                                     new_warn_records = []
+                                    new_sup_rows = []
                                     for stu_info in selected_warn_students:
-                                        name = stu_info.split(" (")[0]
-                                        new_warn_records.append({
+                                        cls_n, name, is_dual = warn_opt_map[stu_info]
+                                        rec = {
                                             "學年度": counsel_term, 
                                             "預警科目": selected_warn_subject, 
                                             "學生姓名": name,
@@ -1006,13 +1140,49 @@ else:
                                             "輔導日期": counsel_date.strftime("%Y/%m/%d"),
                                             "指導教師": st.session_state.user_name,
                                             "佐證資料連結": " / ".join(p_entries)
-                                        })
+                                        }
+                                        if do_sync and is_dual:
+                                            lid = new_link_id()
+                                            rec[LINK_COL] = lid
+                                            stu_score = 0
+                                            sd = df_students[df_students['學生姓名'] == name]
+                                            if '班別' in sd.columns and not sd.empty:
+                                                sd_cls = sd[sd['班別'].map(_norm_cell) == cls_n]
+                                                if not sd_cls.empty: sd = sd_cls
+                                            score_col_name = f"{selected_warn_subject}_成績"
+                                            if not sd.empty and score_col_name in sd.columns:
+                                                val = sd.iloc[0].get(score_col_name, 0)
+                                                if pd.notna(val): stu_score = val
+                                            new_sup_rows.append({
+                                                "學年度": counsel_term, "授課科目": selected_warn_subject, "學生姓名": name,
+                                                "篩選測驗成績": stu_score, "教學內容摘要": summary, "教學輔導策略": ", ".join(strategy),
+                                                "學習狀況": status, "診斷日期": sys_date, "輔導日期": counsel_date.strftime("%Y/%m/%d"),
+                                                "佐證資料連結": " / ".join(p_entries), LINK_COL: lid
+                                            })
+                                        new_warn_records.append(rec)
                                     
-                                    new_warn_df = pd.DataFrame(new_warn_records)
-                                    updated_warn_df = pd.concat([df_warn_records, new_warn_df], ignore_index=True)
-                                    write_sheet("Warning_Records", updated_warn_df)
-                                    flash(f'✅ 已成功批次儲存 {len(new_warn_records)} 筆預警紀錄！', icon='🎉')
-                                    st.rerun()
+                                    primary_ok = True
+                                    try:
+                                        write_sheet("Warning_Records", pd.concat([df_warn_records, pd.DataFrame(new_warn_records)], ignore_index=True))
+                                    except Exception as e:
+                                        primary_ok = False
+                                        st.error(f"❌ 【學習預警】紀錄儲存失敗，本次資料**均未寫入**（包含扶助同步紀錄）。請稍後再按一次「批次儲存預警紀錄」。\n\n錯誤訊息：{e}")
+                                    
+                                    if primary_ok:
+                                        sync_failed = False
+                                        if new_sup_rows:
+                                            try:
+                                                write_sheet("Records", pd.concat([df_records, pd.DataFrame(new_sup_rows)], ignore_index=True))
+                                            except Exception as e:
+                                                sync_failed = True
+                                                st.session_state.dual_retry = {"sheet": "Records", "label": "學習扶助", "done_label": "學習預警",
+                                                                               "rows": new_sup_rows, "error": str(e)}
+                                        st.session_state.warn_form_id += 1
+                                        if not sync_failed:
+                                            msg = f'✅ 已成功批次儲存 {len(new_warn_records)} 筆預警紀錄！'
+                                            if new_sup_rows: msg = f'✅ 已成功批次儲存 {len(new_warn_records)} 筆預警紀錄，並同步登錄 {len(new_sup_rows)} 筆扶助紀錄！'
+                                            flash(msg, icon='🎉')
+                                        st.rerun()
 
         # ==================================================
         # 分頁 2：🗂️ 個人紀錄回顧
@@ -1021,6 +1191,56 @@ else:
             if st.session_state.edit_record_idx is None:
                 rev_mode = st.radio("🔍 選擇查詢範圍：", ["📚 學習扶助系統", "⚠️ 學習預警系統"], horizontal=True, key="rev_mode")
                 st.markdown("---")
+                sup_link_ids = link_id_set(df_records)
+                warn_link_ids = link_id_set(df_warn_records)
+
+                # ---- 刪除有「同步登錄」對應紀錄的資料：詢問要同時刪除或只刪除這一筆 ----
+                pend = st.session_state.get("pending_delete")
+                if pend:
+                    is_sup_rec = pend["type"] == "扶助"
+                    src_df, oth_df = (df_records, df_warn_records) if is_sup_rec else (df_warn_records, df_records)
+                    src_sheet, oth_sheet = ("Records", "Warning_Records") if is_sup_rec else ("Warning_Records", "Records")
+                    src_label, oth_label = ("學習扶助", "學習預警") if is_sup_rec else ("學習預警", "學習扶助")
+                    if pend["idx"] not in src_df.index or rec_signature(src_df.loc[pend["idx"]]) != pend["sig"]:
+                        st.session_state.pop("pending_delete", None)
+                        st.warning("⚠️ 該筆紀錄已變動或不存在，已取消刪除。請重新操作。")
+                    else:
+                        row_p = src_df.loc[pend["idx"]]
+                        partner_idx = find_linked_idx(oth_df, row_p.get(LINK_COL, ""))
+                        if not partner_idx:
+                            st.session_state.pop("pending_delete", None)
+                            st.info("ℹ️ 另一系統的對應紀錄已不存在，請重新按一次「刪除」。")
+                        else:
+                            st.warning(f"🔗 您要刪除的【{src_label}】紀錄（{row_p['學生姓名']}｜{_norm_cell(row_p.get('輔導日期', ''))}）有同步登錄的【{oth_label}】紀錄（{len(partner_idx)} 筆），請選擇：")
+                            bd1, bd2, bd3 = st.columns(3)
+                            do_both = bd1.button(f"🗑️ 同時刪除兩筆（{src_label}＋{oth_label}）", key="pend_del_both", use_container_width=True)
+                            do_one = bd2.button("🗑️ 只刪除這一筆", key="pend_del_one", use_container_width=True)
+                            do_cancel = bd3.button("↩️ 取消", key="pend_del_cancel", use_container_width=True)
+                            if do_cancel:
+                                st.session_state.pop("pending_delete", None)
+                                st.rerun()
+                            if do_one or do_both:
+                                src_ok, src_err, oth_err = True, None, None
+                                try:
+                                    write_sheet(src_sheet, src_df.drop(pend["idx"]))
+                                except Exception as e:
+                                    src_ok, src_err = False, e
+                                if not src_ok:
+                                    st.error(f"❌ 【{src_label}】紀錄刪除失敗，**未刪除任何資料**。錯誤訊息：{src_err}")
+                                else:
+                                    if do_both:
+                                        try:
+                                            write_sheet(oth_sheet, oth_df.drop(partner_idx))
+                                        except Exception as e:
+                                            oth_err = e
+                                    st.session_state.pop("pending_delete", None)
+                                    if oth_err:
+                                        st.session_state["_sticky_error"] = f"⚠️ 【{src_label}】紀錄已刪除，但【{oth_label}】對應紀錄**刪除失敗**：{oth_err}。請至「個人紀錄回顧」切換到【{oth_label}】手動刪除。"
+                                    elif do_both:
+                                        flash(f"✅ 已同時刪除【{src_label}】與【{oth_label}】的紀錄！", icon="🗑️")
+                                    else:
+                                        flash(f"✅ 已刪除這一筆【{src_label}】紀錄（【{oth_label}】對應紀錄保留）。", icon="🗑️")
+                                    st.rerun()
                 
                 if rev_mode == "📚 學習扶助系統":
                     st.subheader("🗂️ 您的學習扶助紀錄")
@@ -1037,6 +1257,7 @@ else:
                         _recs_sorted = my_records.sort_values("輔導日期", ascending=False)
                         for idx, row in _recs_sorted.head(_lim).iterrows():
                             with st.expander(f"📅 {row.get('輔導日期', row.get('診斷日期', ''))} | {row['學生姓名']} ({row['授課科目']}) - {row['教學內容摘要']}"):
+                                if _norm_cell(row.get(LINK_COL, "")) in warn_link_ids: st.caption("🔗 此紀錄已同步登錄於【學習預警】")
                                 st.markdown(f"- **教學輔導時間：** {row.get('學年度', '未註記')}\n- **輔導日期：** {row.get('輔導日期', '未註記')}\n- **診斷日期：** {row['診斷日期']}\n- **篩選成績：** {row['篩選測驗成績']}\n- **策略：** {row['教學輔導策略']}\n- **狀況：** {row['學習狀況']}")
                                 p_data = str(row['佐證資料連結'])
                                 if p_data and p_data != "nan":
@@ -1056,10 +1277,14 @@ else:
                                         st.rerun()
                                 with col_del:
                                     if st.button("🗑️ 刪除", key=f"btn_del_sup_{idx}"):
-                                        df_records = df_records.drop(idx)
-                                        write_sheet("Records", df_records)
-                                        flash("✅ 紀錄已成功刪除！", icon="🗑️")
-                                        st.rerun()
+                                        if _norm_cell(row.get(LINK_COL, "")) in warn_link_ids and find_linked_idx(df_warn_records, row.get(LINK_COL, "")):
+                                            st.session_state["pending_delete"] = {"type": "扶助", "idx": idx, "sig": rec_signature(row)}
+                                            st.rerun()
+                                        else:
+                                            df_records = df_records.drop(idx)
+                                            write_sheet("Records", df_records)
+                                            flash("✅ 紀錄已成功刪除！", icon="🗑️")
+                                            st.rerun()
                                         
                         if len(_recs_sorted) > _lim:
                             if st.button(f"⬇️ 顯示更多（目前顯示 {_lim} / 共 {len(_recs_sorted)} 筆）", key="more_sup"):
@@ -1074,6 +1299,7 @@ else:
                         _recs_sorted = my_warn_records.sort_values("輔導日期", ascending=False)
                         for idx, row in _recs_sorted.head(_lim).iterrows():
                             with st.expander(f"📅 {row.get('輔導日期', '')} | {row['學生姓名']} ({row['預警科目']}) - {row['輔導內容摘要']}"):
+                                if _norm_cell(row.get(LINK_COL, "")) in sup_link_ids: st.caption("🔗 此紀錄已同步登錄於【學習扶助】")
                                 st.markdown(f"- **學年度：** {row.get('學年度', '未註記')}\n- **輔導日期：** {row.get('輔導日期', '未註記')}\n- **策略：** {row['教學輔導策略']}\n- **狀況：** {row['學習狀況']}")
                                 p_data = str(row['佐證資料連結'])
                                 if p_data and p_data != "nan":
@@ -1093,10 +1319,14 @@ else:
                                         st.rerun()
                                 with col_del:
                                     if st.button("🗑️ 刪除", key=f"btn_del_warn_{idx}"):
-                                        df_warn_records = df_warn_records.drop(idx)
-                                        write_sheet("Warning_Records", df_warn_records)
-                                        flash("✅ 預警紀錄已刪除！", icon="🗑️")
-                                        st.rerun()
+                                        if _norm_cell(row.get(LINK_COL, "")) in sup_link_ids and find_linked_idx(df_records, row.get(LINK_COL, "")):
+                                            st.session_state["pending_delete"] = {"type": "預警", "idx": idx, "sig": rec_signature(row)}
+                                            st.rerun()
+                                        else:
+                                            df_warn_records = df_warn_records.drop(idx)
+                                            write_sheet("Warning_Records", df_warn_records)
+                                            flash("✅ 預警紀錄已刪除！", icon="🗑️")
+                                            st.rerun()
 
                         if len(_recs_sorted) > _lim:
                             if st.button(f"⬇️ 顯示更多（目前顯示 {_lim} / 共 {len(_recs_sorted)} 筆）", key="more_warn"):
@@ -1114,6 +1344,7 @@ else:
                     apply_bg_color(edit_sub)
                     
                     st.subheader(f"✏️ 編輯扶助紀錄：{edit_row['學生姓名']} - {edit_sub}")
+                    partner_idx_list = find_linked_idx(df_warn_records, edit_row.get(LINK_COL, ""))
                     with st.form("edit_record_form", clear_on_submit=False):
                         c1, c2 = st.columns(2)
                         with c1:
@@ -1129,11 +1360,11 @@ else:
                             new_summary = st.text_input("教學摘要 (代碼)", value=str(edit_row['教學內容摘要']))
                             old_strat_str = str(edit_row['教學輔導策略'])
                             old_strats = [s.strip() for s in old_strat_str.split(",")] if old_strat_str and old_strat_str != "nan" else []
-                            available_strats = ["演示教學", "學習單、試題習寫", "實物操作", "數位學習平台"]
+                            available_strats = COMMON_STRATEGIES
                             valid_old_strats = [s for s in old_strats if s in available_strats]
                             new_strategy = st.multiselect("輔導策略", available_strats, default=valid_old_strats)
                             old_status = str(edit_row['學習狀況'])
-                            status_options = ["精熟", "未精熟，已解說", "未精熟，改日再測"]
+                            status_options = COMMON_STATUS
                             default_status_idx = status_options.index(old_status) if old_status in status_options else 0
                             new_status = st.radio("學習狀況", status_options, index=default_status_idx)
                         
@@ -1141,6 +1372,12 @@ else:
                         st.markdown(f"📂 **目前佐證資料：** `{old_p_data if old_p_data and old_p_data != 'nan' else '無'}`")
                         new_p_link = st.text_input("新佐證網址 (若不更改請留白)")
                         new_u_files = st.file_uploader("上傳新佐證檔案 (若不更改請留白，最多三個)", type=["png", "jpg", "jpeg", "pdf", "docx"], accept_multiple_files=True)
+                        
+                        sync_edit = False
+                        if partner_idx_list:
+                            sync_edit_choice = st.radio("🔗 此紀錄已同步登錄於【學習預警】，這次修改要：",
+                                                        ["同步修改【學習預警】的對應紀錄（日期、摘要、策略、學習狀況、佐證）", "只修改這一筆（兩筆之後各自獨立）"])
+                            sync_edit = sync_edit_choice.startswith("同步")
                         
                         c_save, c_cancel = st.columns([1, 1])
                         with c_save: save_btn = st.form_submit_button("💾 儲存修改", use_container_width=True)
@@ -1167,10 +1404,29 @@ else:
                                     df_records.at[edit_idx, '學習狀況'] = new_status
                                     df_records.at[edit_idx, '輔導日期'] = new_counsel_date.strftime("%Y/%m/%d")
                                     df_records.at[edit_idx, '佐證資料連結'] = " / ".join(final_p_entries)
-                                    write_sheet("Records", df_records)
-                                    st.session_state.edit_record_idx = None
-                                    flash('✅ 扶助紀錄更新成功！', icon='🎉')
-                                    st.rerun()
+                                    edit_ok, sync_err = True, None
+                                    try:
+                                        write_sheet("Records", df_records)
+                                    except Exception as e:
+                                        edit_ok = False
+                                        st.error(f"❌ 儲存失敗，本次修改**尚未寫入**：{e}。請稍後再按一次「儲存修改」。")
+                                    if edit_ok and sync_edit:
+                                        try:
+                                            for pidx in partner_idx_list:
+                                                df_warn_records.at[pidx, '輔導內容摘要'] = new_summary
+                                                df_warn_records.at[pidx, '教學輔導策略'] = ", ".join(new_strategy)
+                                                df_warn_records.at[pidx, '學習狀況'] = new_status
+                                                df_warn_records.at[pidx, '輔導日期'] = new_counsel_date.strftime("%Y/%m/%d")
+                                                df_warn_records.at[pidx, '佐證資料連結'] = " / ".join(final_p_entries)
+                                            write_sheet("Warning_Records", df_warn_records)
+                                        except Exception as e:
+                                            sync_err = e
+                                    if edit_ok and sync_err:
+                                        st.error(f"⚠️ 本筆【學習扶助】紀錄已更新，但同步修改【學習預警】對應紀錄**失敗**：{sync_err}。請再按一次「儲存修改」重試同步，或稍後至預警系統手動修改。")
+                                    elif edit_ok:
+                                        st.session_state.edit_record_idx = None
+                                        flash('✅ 扶助紀錄更新成功！' + ('（已同步修改預警對應紀錄）' if sync_edit else ''), icon='🎉')
+                                        st.rerun()
                 elif rec_type == "預警":
                     if edit_idx not in df_warn_records.index:
                         st.session_state.edit_record_idx = None ; st.rerun()
@@ -1179,6 +1435,7 @@ else:
                     apply_bg_color("預設")
                     
                     st.subheader(f"✏️ 編輯預警紀錄：{edit_row['學生姓名']} - {edit_sub}")
+                    partner_idx_list = find_linked_idx(df_records, edit_row.get(LINK_COL, ""))
                     with st.form("edit_warn_record_form", clear_on_submit=False):
                         c1, c2 = st.columns(2)
                         with c1:
@@ -1191,18 +1448,28 @@ else:
                             new_summary = st.text_input("輔導內容摘要", value=str(edit_row['輔導內容摘要']))
                             old_strat_str = str(edit_row['教學輔導策略'])
                             old_strats = [s.strip() for s in old_strat_str.split(",")] if old_strat_str and old_strat_str != "nan" else []
-                            available_strats = ["個別指導", "小組合作", "學習單練習", "線上資源輔助", "親師聯繫", "其他"]
+                            available_strats = COMMON_STRATEGIES
                             valid_old_strats = [s for s in old_strats if s in available_strats]
                             new_strategy = st.multiselect("輔導策略", available_strats, default=valid_old_strats)
+                            _legacy_strats = [s for s in old_strats if s not in available_strats]
+                            if _legacy_strats: st.caption(f"ℹ️ 原策略「{'、'.join(_legacy_strats)}」為舊版選項，已不在清單中，儲存後將被取代。")
                             old_status = str(edit_row['學習狀況'])
-                            status_options = ["有進步", "持平", "需持續觀察", "退步"]
+                            status_options = COMMON_STATUS
                             default_status_idx = status_options.index(old_status) if old_status in status_options else 0
                             new_status = st.radio("學習狀況", status_options, index=default_status_idx)
+                            if old_status not in status_options and old_status not in ("", "nan"):
+                                st.caption(f"ℹ️ 原紀錄的學習狀況為「{old_status}」（舊版選項），請重新選擇。")
                         
                         old_p_data = str(edit_row['佐證資料連結'])
                         st.markdown(f"📂 **目前佐證資料：** `{old_p_data if old_p_data and old_p_data != 'nan' else '無'}`")
                         new_p_link = st.text_input("新佐證網址 (若不更改請留白)")
                         new_u_files = st.file_uploader("上傳新佐證檔案 (若不更改請留白，最多三個)", type=["png", "jpg", "jpeg", "pdf", "docx"], accept_multiple_files=True)
+                        
+                        sync_edit = False
+                        if partner_idx_list:
+                            sync_edit_choice = st.radio("🔗 此紀錄已同步登錄於【學習扶助】，這次修改要：",
+                                                        ["同步修改【學習扶助】的對應紀錄（日期、摘要、策略、學習狀況、佐證）", "只修改這一筆（兩筆之後各自獨立）"])
+                            sync_edit = sync_edit_choice.startswith("同步")
                         
                         c_save, c_cancel = st.columns([1, 1])
                         with c_save: save_btn = st.form_submit_button("💾 儲存修改", use_container_width=True)
@@ -1228,10 +1495,29 @@ else:
                                     df_warn_records.at[edit_idx, '學習狀況'] = new_status
                                     df_warn_records.at[edit_idx, '輔導日期'] = new_counsel_date.strftime("%Y/%m/%d")
                                     df_warn_records.at[edit_idx, '佐證資料連結'] = " / ".join(final_p_entries)
-                                    write_sheet("Warning_Records", df_warn_records)
-                                    st.session_state.edit_record_idx = None
-                                    flash('✅ 預警紀錄更新成功！', icon='🎉')
-                                    st.rerun()
+                                    edit_ok, sync_err = True, None
+                                    try:
+                                        write_sheet("Warning_Records", df_warn_records)
+                                    except Exception as e:
+                                        edit_ok = False
+                                        st.error(f"❌ 儲存失敗，本次修改**尚未寫入**：{e}。請稍後再按一次「儲存修改」。")
+                                    if edit_ok and sync_edit:
+                                        try:
+                                            for pidx in partner_idx_list:
+                                                df_records.at[pidx, '教學內容摘要'] = new_summary
+                                                df_records.at[pidx, '教學輔導策略'] = ", ".join(new_strategy)
+                                                df_records.at[pidx, '學習狀況'] = new_status
+                                                df_records.at[pidx, '輔導日期'] = new_counsel_date.strftime("%Y/%m/%d")
+                                                df_records.at[pidx, '佐證資料連結'] = " / ".join(final_p_entries)
+                                            write_sheet("Records", df_records)
+                                        except Exception as e:
+                                            sync_err = e
+                                    if edit_ok and sync_err:
+                                        st.error(f"⚠️ 本筆【學習預警】紀錄已更新，但同步修改【學習扶助】對應紀錄**失敗**：{sync_err}。請再按一次「儲存修改」重試同步，或稍後至扶助系統手動修改。")
+                                    elif edit_ok:
+                                        st.session_state.edit_record_idx = None
+                                        flash('✅ 預警紀錄更新成功！' + ('（已同步修改扶助對應紀錄）' if sync_edit else ''), icon='🎉')
+                                        st.rerun()
 
         # ==================================================
         # 分頁 3：🕰️ 歷史紀錄查詢
