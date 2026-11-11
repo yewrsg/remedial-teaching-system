@@ -304,19 +304,20 @@ def new_link_id():
     return uuid.uuid4().hex[:10]
 
 def get_dual_triples(df_sup_students, df_warn_students_, user):
-    """同時是扶助與預警對象的集合 {(班別, 姓名, 科目)}：同學生＋同科目＋同一位教學者（目前登入者）"""
+    """同時是扶助與預警對象的集合 {(學生姓名, 科目)}：同學生＋同科目＋同一位教學者（目前登入者）。
+    兩份名單的「班別」寫法可能不同（例如「六年一班」與「601」），因此只以姓名比對，不比對班別。"""
     sup = set()
     for _, r in df_sup_students.iterrows():
         for sub in SUP_SUBJECTS:
             if str(r.get(f'{sub}_教學者', '')).strip() == user:
-                sup.add((_norm_cell(r.get('班別', '')), _norm_cell(r.get('學生姓名', '')), sub))
+                sup.add((_norm_cell(r.get('學生姓名', '')), sub))
     warn = set()
     for sub in SUP_SUBJECTS:  # 只有扶助的三個科目才可能重疊
         col = f"{sub}教學者"
         if col in df_warn_students_.columns:
             sub_df = df_warn_students_[df_warn_students_[col].astype(str).str.strip() == user]
             for _, r in sub_df.iterrows():
-                warn.add((_norm_cell(r.get('班別', '')), _norm_cell(r.get('學生姓名', '')), sub))
+                warn.add((_norm_cell(r.get('學生姓名', '')), sub))
     return sup & warn
 
 def find_linked_idx(df_other, link_id):
@@ -950,6 +951,8 @@ else:
             render_dual_retry_box()
             dual_triples = get_dual_triples(df_students, df_warn_students, st.session_state.user_name)
             sys_mode = st.radio("🔍 請選擇欲填報的輔導系統：", ["📚 學習扶助系統", "⚠️ 學習預警系統"], horizontal=True)
+            if not dual_triples:
+                st.caption("ℹ️ 同步登錄：目前沒有同時屬於扶助與預警對象的學生（需同一位學生、同一科目，且兩個系統的教學者都是您）。符合條件的學生會標示 🔗。")
             st.markdown("---")
             
             if sys_mode == "📚 學習扶助系統":
@@ -961,7 +964,7 @@ else:
                         if str(row.get(f'{sub}_教學者', '')).strip() == st.session_state.user_name:
                             ts = f"{row['學生姓名']} - {sub}"
                             teacher_students.append(ts)
-                            if (_norm_cell(row.get('班別', '')), _norm_cell(row['學生姓名']), sub) in dual_triples:
+                            if (_norm_cell(row['學生姓名']), sub) in dual_triples:
                                 sup_dual.add(ts)
                 
                 if not teacher_students:
@@ -1080,7 +1083,7 @@ else:
                     warn_opt_map = {}
                     for _, r in df_target_students.iterrows():
                         cls_n, stu_n = _norm_cell(r['班別']), _norm_cell(r['學生姓名'])
-                        is_dual = (cls_n, stu_n, selected_warn_subject) in dual_triples
+                        is_dual = (stu_n, selected_warn_subject) in dual_triples
                         label = f"{r['學生姓名']} ({r['班別']})" + (" 🔗" if is_dual else "")
                         warn_opt_map[label] = (cls_n, stu_n, is_dual)
                     student_options = list(warn_opt_map.keys())
