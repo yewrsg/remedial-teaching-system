@@ -1090,7 +1090,11 @@ else:
                     
                     with st.form(f"warning_record_form_{st.session_state.warn_form_id}", clear_on_submit=False):
                         st.markdown(f"**📌 步驟二：請選擇參與輔導的【{selected_warn_subject}】預警學生 (可多選)：**")
-                        selected_warn_students = st.multiselect("勾選學生", student_options)
+                        selected_warn_students = []
+                        warn_chk_cols = st.columns(4)
+                        for i, opt in enumerate(student_options):
+                            if warn_chk_cols[i % 4].checkbox(opt, key=f"warn_chk_{selected_warn_subject}_{opt}_{st.session_state.warn_form_id}"):
+                                selected_warn_students.append(opt)
                         
                         c1, c2 = st.columns(2)
                         with c1:
