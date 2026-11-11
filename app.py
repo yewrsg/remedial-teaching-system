@@ -33,8 +33,11 @@ st.markdown("""
     .login-brand-row {
         display: flex;
         align-items: center;
+        justify-content: center;
         gap: 20px;
         margin: 0 0 18px 0;
+        padding: 8px 0 16px 0;
+        border-bottom: 2px solid #c6a15b;
     }
     .login-school-logo {
         display: block;
@@ -44,14 +47,13 @@ st.markdown("""
         object-fit: contain;
     }
     .login-brand {
-        flex: 1 1 auto;
+        flex: 0 1 auto;
         min-width: 0;
-        padding: 8px 0 16px 0;
-        border-bottom: 2px solid #c6a15b;
+        text-align: center;
     }
     .login-school-name {
         color: #16325c;
-        font-size: 1.35rem;
+        font-size: 1.85rem;
         font-weight: 750;
         letter-spacing: 1px;
         line-height: 1.35;
@@ -61,19 +63,7 @@ st.markdown("""
         color: #64748b;
         font-size: 0.72rem;
         letter-spacing: 1.1px;
-        margin: 0 0 10px 0;
-    }
-    .login-system-name {
-        color: #16325c;
-        font-size: 1.45rem;
-        font-weight: 700;
-        line-height: 1.45;
         margin: 0;
-    }
-    .login-system-en {
-        color: #64748b;
-        font-size: 0.82rem;
-        margin-top: 3px;
     }
     .login-news-panel { margin-top: 10px; }
     .login-news-heading {
@@ -150,7 +140,7 @@ st.markdown("""
         }
         .login-brand-row { gap: 12px; }
         .login-school-logo { width: 64px; height: 64px; flex-basis: 64px; }
-        .login-system-name { font-size: 1.22rem; }
+        .login-school-name { font-size: 1.45rem; }
         .login-news-list { max-height: 420px; }
     }
     
@@ -612,17 +602,16 @@ if not st.session_state.logged_in:
     logo_html = ""
     if isinstance(sys_logo, str) and sys_logo.startswith("data:image"):
         logo_html = f'<img class="login-school-logo" src="{sys_logo}" alt="文昌國小校徽">'
-    st.markdown(f"""
-        <div class="login-brand-row">
-            {logo_html}
-            <div class="login-brand">
-                <div class="login-school-name">{sys_name}</div>
-                <div class="login-school-en">WUN CHANG ELEMENTARY SCHOOL</div>
-                <div class="login-system-name">學習扶助教學輔導登錄系統</div>
-                <div class="login-system-en">Learning Support &amp; Teaching Guidance System</div>
-            </div>
-        </div>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        '<div class="login-brand-row">'
+        f'{logo_html}'
+        '<div class="login-brand">'
+        f'<div class="login-school-name">{safe_html_text(str(sys_name).replace("🏫", "").strip())}</div>'
+        '<div class="login-school-en">WUN CHANG ELEMENTARY SCHOOL</div>'
+        '</div>'
+        '</div>',
+        unsafe_allow_html=True
+    )
 
     # 公告與登入採左右分欄；完整呈現 News 工作表內所有公告，不再只顯示前三筆
     col_news, col_login = st.columns([1.15, 0.85], gap="large")
