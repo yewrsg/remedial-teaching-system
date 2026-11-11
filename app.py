@@ -918,7 +918,8 @@ else:
         try:
             df_warn_records = read_sheet("Warning_Records", ttl=600).dropna(how="all")
             required_warn_cols = ["學年度", "預警科目", "學生姓名", "輔導內容摘要", "教學輔導策略", "學習狀況", "填報日期", "輔導日期", "指導教師", "佐證資料連結"]
-            if list(df_warn_records.columns) != required_warn_cols:
+            # 只要必要欄位都在就保留資料（允許多出「同步編號」等額外欄位）；缺少必要欄位才視為尚無資料
+            if any(c not in df_warn_records.columns for c in required_warn_cols):
                 df_warn_records = pd.DataFrame(columns=required_warn_cols)
         except Exception:
             df_warn_records = pd.DataFrame(columns=["學年度", "預警科目", "學生姓名", "輔導內容摘要", "教學輔導策略", "學習狀況", "填報日期", "輔導日期", "指導教師", "佐證資料連結"])
