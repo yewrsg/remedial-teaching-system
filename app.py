@@ -7,6 +7,7 @@ from google.oauth2 import service_account
 import io
 import time
 import threading
+import hashlib
 import html as _html
 import base64
 import re
@@ -224,7 +225,7 @@ def roster_target_cols(existing_df, upload_df, sheet_name):
 
 def diff_roster(existing_df, upload_df):
     """比對名單：以「班別 + 學生姓名」判定是否為同一位學生。
-    回傳 dict：new_df(尚未存在者)、skipped(已存在而略過)、changed(已存在但內容與檔案不同)、
+    回傳 dict：new_df(尚未存在者)、skipped(已存在者)、changed/changes(已存在但內容與檔案不同，含逐欄差異)、
     dup_in_file(檔案內重複)、blank_name(姓名空白)、name_clash(與現有學生同名但班別不同的新增者)"""
     up = upload_df.copy()
     blank_mask = up['學生姓名'].map(_norm_cell) == ""
@@ -242,21 +243,63 @@ def diff_roster(existing_df, upload_df):
             exist_names.add(_norm_cell(r['學生姓名']))
     common = [c for c in up.columns if c not in ('_k', '班別', '學生姓名') and c in existing_df.columns]
 
-    flags, changed, name_clash = [], 0, []
+    flags, changes, name_clash = [], [], []
     for _, r in up.iterrows():
         k = r['_k']
         if k in exist_rows:
             flags.append(False)
             er = exist_rows[k]
-            if any(_norm_cell(r[c]) != _norm_cell(er[c]) for c in common):
-                changed += 1
+            diffs = [(c, _norm_cell(er[c]), _norm_cell(r[c]), r[c]) for c in common if _norm_cell(r[c]) != _norm_cell(er[c])]
+            if diffs:
+                changes.append({"key": k, "班別": k[0], "學生姓名": k[1], "diffs": diffs})
         else:
             flags.append(True)
             if k[1] in exist_names:
                 name_clash.append(f"{k[0]} {k[1]}")
     new_df = up.loc[pd.Series(flags, index=up.index, dtype=bool)].drop(columns=['_k'])
-    return {"new_df": new_df, "skipped": len(up) - len(new_df), "changed": changed,
+    return {"new_df": new_df, "skipped": len(up) - len(new_df), "changed": len(changes), "changes": changes,
             "dup_in_file": dup_in_file, "blank_name": blank_name, "name_clash": name_clash, "total": len(up)}
+
+def prepare_fresh_roster(fresh_df, sheet_name):
+    """預警學生名單若缺少標準欄位就補空欄（與讀取時的處理一致）"""
+    if sheet_name == "Warning_Students":
+        for c in WARN_STUDENT_COLS:
+            if c not in fresh_df.columns:
+                fresh_df[c] = ""
+    return fresh_df
+
+def _disp_cell(v):
+    return v if v != "" else "（空白）"
+
+def apply_roster_updates(fresh_df, changes, selected_keys):
+    """把勾選學生的「有差異欄位」更新成檔案內的值；回傳 (新資料表, 實際更新學生數)"""
+    df = fresh_df.copy()
+    key_to_idx = {}
+    for idx, r in df.iterrows():
+        key_to_idx.setdefault((_norm_cell(r['班別']), _norm_cell(r['學生姓名'])), []).append(idx)
+    n_students = 0
+    for ch in changes:
+        if ch["key"] not in selected_keys:
+            continue
+        idxs = key_to_idx.get(ch["key"], [])
+        if not idxs:
+            continue
+        for col, _old, _new, raw in ch["diffs"]:
+            if col not in df.columns:
+                df[col] = ""
+            df[col] = df[col].astype(object)  # 避免數字欄位寫入文字時發生型別衝突
+            if hasattr(raw, "item"):
+                raw = raw.item()
+            if _norm_cell(raw) == "":
+                val = float("nan")
+            elif isinstance(raw, float) and raw.is_integer():
+                val = int(raw)
+            else:
+                val = raw
+            for i in idxs:
+                df.at[i, col] = val
+        n_students += 1
+    return df, n_students
 
 def safe_html_text(value):
     """公告文字轉成可安全嵌入 HTML 的單行字串：
@@ -1551,7 +1594,7 @@ else:
                     roster_label, roster_sheet, roster_now = "預警學生", "Warning_Students", df_warn_students
                     roster_sample_cols = WARN_STUDENT_COLS
 
-                st.info(f"💡 匯入時會先與系統現有的【{roster_label}】名單比對（以「班別＋學生姓名」判定，目前系統內有 {len(roster_now)} 筆），**只新增尚未存在的學生**，不會修改或刪除既有學生。上傳後會先顯示預覽，確認無誤再執行。")
+                st.info(f"💡 上傳後會先與系統現有的【{roster_label}】名單比對（以「班別＋學生姓名」判定，目前系統內有 {len(roster_now)} 筆）並顯示預覽：①**尚未存在的學生**可勾選「確認新增」；②**已存在但內容有差異的學生**可逐位勾選後更新。任何學生都不會被刪除，且需按下確認才會寫入。")
 
                 st.write(f"**1. 下載【{roster_label}】範例檔**")
                 st.download_button(
@@ -1560,9 +1603,8 @@ else:
                     file_name=f"{roster_label}_範例.csv", mime="text/csv", key="roster_sample_dl"
                 )
 
-                st.write(f"**2. 上傳【{roster_label}】名單並預覽（只新增尚未存在的學生）**")
-                up_ver = st.session_state.get("roster_up_ver", 0)
-                roster_file = st.file_uploader(f"上傳【{roster_label}】名單 (CSV)", type=["csv"], key=f"roster_upload_{up_ver}")
+                st.write(f"**2. 上傳【{roster_label}】名單並預覽差異**")
+                roster_file = st.file_uploader(f"上傳【{roster_label}】名單 (CSV)", type=["csv"], key="roster_upload")
 
                 if roster_file:
                     up_df = read_roster_csv(roster_file.getvalue())
@@ -1579,22 +1621,24 @@ else:
                             target_cols = roster_target_cols(roster_now, up_df, roster_sheet)
                             ignored_cols = [c for c in up_df.columns if c not in target_cols]
 
-                            m1, m2, m3 = st.columns(3)
+                            m1, m2, m3, m4 = st.columns(4)
                             m1.metric("檔案內學生數", res["total"])
-                            m2.metric("✅ 將新增", len(res["new_df"]))
-                            m3.metric("已存在（略過）", res["skipped"])
+                            m2.metric("🆕 尚未存在", len(res["new_df"]))
+                            m3.metric("🔄 內容有差異", res["changed"])
+                            m4.metric("已存在且相同", res["skipped"] - res["changed"])
 
                             if res["blank_name"] or res["dup_in_file"]:
                                 st.caption(f"ℹ️ 已自動排除：姓名空白 {res['blank_name']} 列、檔案內重複 {res['dup_in_file']} 列。")
-                            if res["changed"]:
-                                st.caption(f"ℹ️ 其中 {res['changed']} 位已存在的學生，檔案內的教學者/成績與系統不同；本功能不會更新既有學生，如需修改請聯絡系統管理者。")
                             if ignored_cols:
                                 st.caption(f"ℹ️ 檔案中的欄位 {'、'.join(ignored_cols)} 不在系統資料表內，將被忽略。")
 
-                            if res["new_df"].empty:
-                                st.info("📭 檔案中的學生都已存在於系統，沒有需要新增的名單。")
-                            else:
-                                st.markdown(f"**📋 預覽：以下 {len(res['new_df'])} 位學生將被新增**")
+                            if res["new_df"].empty and not res["changes"]:
+                                st.success("✅ 檔案內容與系統名單完全一致，沒有需要新增或更新的資料。")
+
+                            # ---------- ① 新增尚未存在的學生 ----------
+                            if not res["new_df"].empty:
+                                st.markdown("---")
+                                st.markdown(f"**① 預覽：以下 {len(res['new_df'])} 位學生尚未存在，可新增**")
                                 st.dataframe(res["new_df"].reindex(columns=[c for c in target_cols if c in res["new_df"].columns]),
                                              use_container_width=True, hide_index=True)
                                 if res["name_clash"]:
@@ -1605,7 +1649,7 @@ else:
                                     try:
                                         with st.spinner("新增中..."):
                                             # 寫入前重新讀取最新名單再比對一次，避免覆蓋他人剛做的修改
-                                            fresh = read_sheet(roster_sheet, ttl=0).dropna(how="all")
+                                            fresh = prepare_fresh_roster(read_sheet(roster_sheet, ttl=0).dropna(how="all"), roster_sheet)
                                             fresh_res = diff_roster(fresh, up_df)
                                             if not fresh_res["new_df"].empty:
                                                 fresh_cols = roster_target_cols(fresh, up_df, roster_sheet)
@@ -1616,8 +1660,52 @@ else:
                                     except Exception as e:
                                         st.error(f"❌ 新增失敗：{e}")
                                     if roster_saved:
-                                        st.session_state["roster_up_ver"] = up_ver + 1  # 重設上傳欄位
                                         flash(f"✅ 已新增 {added_n} 位{roster_label}！" if added_n else "📭 沒有需要新增的名單（可能已被他人新增）。")
+                                        st.rerun()
+
+                            # ---------- ② 更新已存在但內容有差異的學生 ----------
+                            if res["changes"]:
+                                st.markdown("---")
+                                st.markdown(f"**② 預覽：以下 {len(res['changes'])} 位學生已存在，但檔案內容與系統不同，請勾選要更新的學生**")
+                                st.caption("只會更新「變更內容」中列出的欄位；未勾選的學生維持原樣。檔案內的空白會把系統內原有資料清空，請留意「（空白）」的項目。已儲存的輔導紀錄（含當時的篩選成績）不會因此改變。")
+
+                                chg_keys = [ch["key"] for ch in res["changes"]]
+                                sel_all = st.checkbox("全選", key="roster_chg_sel_all")
+                                chg_df = pd.DataFrame({
+                                    "更新": [bool(sel_all)] * len(chg_keys),
+                                    "班別": [ch["班別"] for ch in res["changes"]],
+                                    "學生姓名": [ch["學生姓名"] for ch in res["changes"]],
+                                    "變更內容": ["；".join(f"{c}：{_disp_cell(o)} → {_disp_cell(n)}" for c, o, n, _raw in ch["diffs"]) for ch in res["changes"]],
+                                })
+                                # 差異內容或全選狀態改變時換一個 key，避免舊的勾選狀態錯置到別的學生
+                                sig = hashlib.md5((repr(chg_keys) + repr(chg_df["變更內容"].tolist())).encode("utf-8")).hexdigest()[:10]
+                                edited = st.data_editor(
+                                    chg_df, key=f"roster_chg_editor_{int(bool(sel_all))}_{sig}",
+                                    hide_index=True, use_container_width=True,
+                                    disabled=["班別", "學生姓名", "變更內容"],
+                                    column_config={
+                                        "更新": st.column_config.CheckboxColumn("更新", default=False, width="small"),
+                                        "變更內容": st.column_config.TextColumn("變更內容", width="large"),
+                                    },
+                                )
+                                sel_pos = [i for i, v in enumerate(edited["更新"].tolist()) if v]
+
+                                if st.button(f"✅ 確認更新已勾選的 {len(sel_pos)} 位學生", type="primary", key="roster_update_btn", disabled=(len(sel_pos) == 0)):
+                                    sel_keys = {chg_keys[i] for i in sel_pos}
+                                    roster_saved, upd_n = False, 0
+                                    try:
+                                        with st.spinner("更新中..."):
+                                            # 寫入前重新讀取最新名單再比對，只套用仍有差異且已勾選的學生
+                                            fresh = prepare_fresh_roster(read_sheet(roster_sheet, ttl=0).dropna(how="all"), roster_sheet)
+                                            fresh_res = diff_roster(fresh, up_df)
+                                            merged, upd_n = apply_roster_updates(fresh, fresh_res["changes"], sel_keys)
+                                            if upd_n:
+                                                write_sheet(roster_sheet, merged)
+                                            roster_saved = True
+                                    except Exception as e:
+                                        st.error(f"❌ 更新失敗：{e}")
+                                    if roster_saved:
+                                        flash(f"✅ 已更新 {upd_n} 位{roster_label}的資料！" if upd_n else "📭 勾選的學生已沒有差異，無需更新。")
                                         st.rerun()
 
         # --- ⚙️ 系統設定分頁 ---
