@@ -26,7 +26,8 @@ st.set_page_config(page_title="學習扶助教學輔導登錄系統", layout="wi
 st.markdown("""
     <style>
     /* 全域間距調整 */
-    .block-container { padding-top: 1rem !important; padding-bottom: 2rem !important; max-width: 1100px; }
+    /* Streamlit 頂端工具列為固定定位（高約 3.75rem），上方留白需大於工具列高度，否則頁首內容會被遮住 */
+    .block-container { padding-top: calc(3.75rem + 1rem) !important; padding-bottom: 2rem !important; max-width: 1100px; }
     
     /* 登入首頁：方案 C－簡約清爽資訊風 */
     .login-home-marker { height: 0; margin: 0; padding: 0; }
